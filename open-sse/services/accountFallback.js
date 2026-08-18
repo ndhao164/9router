@@ -87,11 +87,13 @@ export function getEarliestRateLimitedUntil(accounts) {
  * @param {string} rateLimitedUntil - ISO timestamp
  * @returns {string} e.g. "reset after 2m 30s"
  */
-export function formatRetryAfter(rateLimitedUntil) {
+export function formatRetryAfter(rateLimitedUntil, nowMs = Date.now()) {
   if (!rateLimitedUntil) return "";
-  const diffMs = new Date(rateLimitedUntil).getTime() - Date.now();
+  const diffMs = new Date(rateLimitedUntil).getTime() - nowMs;
   if (diffMs <= 0) return "reset after 0s";
-  const totalSec = Math.ceil(diffMs / 1000);
+  // Provider messages display the whole elapsed seconds (e.g. 42.711s → 42s).
+  // The HTTP Retry-After header remains rounded up separately to avoid early retry.
+  const totalSec = Math.max(Math.floor(diffMs / 1000), 1);
   const h = Math.floor(totalSec / 3600);
   const m = Math.floor((totalSec % 3600) / 60);
   const s = totalSec % 60;
@@ -100,6 +102,18 @@ export function formatRetryAfter(rateLimitedUntil) {
   if (m > 0) parts.push(`${m}m`);
   if (s > 0 || parts.length === 0) parts.push(`${s}s`);
   return `reset after ${parts.join(" ")}`;
+}
+
+/**
+ * Prefer the authoritative reset attached to the current upstream error over
+ * an aggregate/earlier account lock. This keeps an error message and its
+ * Retry-After value from referring to different accounts.
+ */
+export function resolveRetryAfter(fallbackRetryAfter, preciseResetsAtMs, nowMs = Date.now()) {
+  if (Number.isFinite(preciseResetsAtMs) && preciseResetsAtMs > nowMs) {
+    return new Date(preciseResetsAtMs).toISOString();
+  }
+  return fallbackRetryAfter || null;
 }
 
 /** Prefix for model lock flat fields on connection record */
@@ -118,10 +132,30 @@ export function getModelLockKey(model) {
  * Reads flat field `modelLock_${model}` (or `modelLock___all` when model=null).
  */
 export function isModelLockActive(connection, model) {
-  const key = getModelLockKey(model);
-  const expiry = connection[key] || connection[MODEL_LOCK_ALL];
-  if (!expiry) return false;
-  return new Date(expiry).getTime() > Date.now();
+  return getModelLockUntil(connection, model) !== null;
+}
+
+/**
+ * Get the time at which a specific model becomes available on a connection.
+ * A model-specific and an account-wide lock may coexist, so the later active
+ * expiry is the actual availability time.
+ */
+export function getModelLockUntil(connection, model) {
+  if (!connection) return null;
+  const now = Date.now();
+  const keys = model
+    ? [getModelLockKey(model), MODEL_LOCK_ALL]
+    : [MODEL_LOCK_ALL];
+  let latest = null;
+
+  for (const key of keys) {
+    const value = connection[key];
+    if (!value) continue;
+    const expiry = new Date(value).getTime();
+    if (expiry > now && (!latest || expiry > latest)) latest = expiry;
+  }
+
+  return latest ? new Date(latest).toISOString() : null;
 }
 
 /**
@@ -144,9 +178,9 @@ export function getEarliestModelLockUntil(connection) {
 /**
  * Build update object to set a model lock on a connection.
  */
-export function buildModelLockUpdate(model, cooldownMs) {
+export function buildModelLockUpdate(model, cooldownMs, nowMs = Date.now()) {
   const key = getModelLockKey(model);
-  return { [key]: new Date(Date.now() + cooldownMs).toISOString() };
+  return { [key]: new Date(nowMs + cooldownMs).toISOString() };
 }
 
 /**

@@ -284,7 +284,7 @@ export function getStatusEmoji(percentage) {
  * Calculate remaining percentage
  * @param {number} used - Used amount
  * @param {number} total - Total amount
- * @returns {number} Remaining percentage (0-100)
+ * @returns {number|null} Remaining percentage (0-100), or null when upstream does not report it
  */
 export function calculatePercentage(used, total) {
   if (!total || total === 0) return 0;
@@ -300,13 +300,15 @@ export function calculatePercentage(used, total) {
  * @returns {number} Remaining percentage (0-100)
  */
 export function getRemainingPercentage(quota) {
-  if (quota?.remaining !== undefined) {
+  if (Number.isFinite(quota?.remaining)) {
     return Math.max(0, Math.round(quota.remaining));
   }
 
-  if (quota?.remainingPercentage !== undefined) {
+  if (Number.isFinite(quota?.remainingPercentage)) {
     return Math.round(quota.remainingPercentage);
   }
+
+  if (quota?.quotaStatus === "unknown") return null;
 
   return calculatePercentage(quota?.used, quota?.total);
 }
@@ -364,13 +366,19 @@ export function parseQuotaData(provider, data) {
       case "antigravity":
         if (data.quotas) {
           Object.entries(data.quotas).forEach(([modelKey, quota]) => {
+            const displayName = quota.displayName || modelKey;
             normalizedQuotas.push({
-              name: quota.displayName || modelKey,
+              name: displayName === modelKey ? modelKey : `${displayName} · ${modelKey}`,
               modelKey: modelKey, // Keep modelKey for sorting
-              used: quota.used || 0,
-              total: quota.total || 0,
+              used: Number.isFinite(quota.used) ? quota.used : null,
+              total: Number.isFinite(quota.total) ? quota.total : null,
               resetAt: quota.resetAt || null,
               remainingPercentage: quota.remainingPercentage,
+              contextLength: quota.contextLength || null,
+              maxOutputTokens: quota.maxOutputTokens || null,
+              discovered: quota.discovered === true,
+              quotaStatus: quota.quotaStatus || "reported",
+              quotaNote: quota.quotaNote || null,
             });
           });
         }

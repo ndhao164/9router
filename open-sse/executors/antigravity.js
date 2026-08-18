@@ -366,15 +366,61 @@ export class AntigravityExecutor extends BaseExecutor {
   parseRetryFromErrorMessage(errorMessage) {
     if (!errorMessage || typeof errorMessage !== "string") return null;
 
-    const match = errorMessage.match(/reset after (\d+h)?(\d+m)?(\d+s)?/i);
+    const match = errorMessage.match(/reset after\s+((?:\d+(?:\.\d+)?[hms]\s*)+)/i);
     if (!match) return null;
 
-    let totalMs = 0;
-    if (match[1]) totalMs += parseInt(match[1]) * 3600 * 1000; // hours
-    if (match[2]) totalMs += parseInt(match[2]) * 60 * 1000; // minutes
-    if (match[3]) totalMs += parseInt(match[3]) * 1000; // seconds
+    return this.parseGoogleDuration(match[1]);
+  }
 
-    return totalMs > 0 ? totalMs : null;
+  // Google retry durations can include fractional seconds, for example
+  // "29m4.338700336s" or "1744.338700336s".
+  parseGoogleDuration(value) {
+    if (!value || typeof value !== "string") return null;
+
+    let totalMs = 0;
+    let matched = false;
+    for (const match of value.matchAll(/(\d+(?:\.\d+)?)([hms])/gi)) {
+      matched = true;
+      const amount = Number(match[1]);
+      const multiplier = match[2].toLowerCase() === "h"
+        ? 3600_000
+        : match[2].toLowerCase() === "m" ? 60_000 : 1000;
+      totalMs += amount * multiplier;
+    }
+
+    return matched && totalMs > 0 ? Math.ceil(totalMs) : null;
+  }
+
+  // Preserve Google's precise quota reset for account locking. RetryInfo and
+  // ErrorInfo are not HTTP retry headers, so BaseExecutor cannot infer this.
+  parseError(response, bodyText) {
+    if (response.status === HTTP_STATUS.RATE_LIMITED && bodyText) {
+      try {
+        const json = JSON.parse(bodyText);
+        const details = Array.isArray(json?.error?.details) ? json.error.details : [];
+        const errorInfo = details.find(detail => detail?.["@type"] === "type.googleapis.com/google.rpc.ErrorInfo");
+        const retryInfo = details.find(detail => detail?.["@type"] === "type.googleapis.com/google.rpc.RetryInfo");
+        const metadata = errorInfo?.metadata || {};
+        const now = Date.now();
+
+        const timestamp = metadata.quotaResetTimeStamp || metadata.quotaResetTimestamp;
+        const timestampMs = timestamp ? new Date(timestamp).getTime() : NaN;
+        let resetsAtMs = Number.isFinite(timestampMs) && timestampMs > now ? timestampMs : null;
+
+        if (!resetsAtMs) {
+          const duration = retryInfo?.retryDelay
+            || metadata.quotaResetDelay;
+          const durationMs = this.parseGoogleDuration(duration)
+            || this.parseRetryFromErrorMessage(json?.error?.message);
+          if (durationMs) resetsAtMs = now + durationMs;
+        }
+
+        if (resetsAtMs) {
+          return { ...super.parseError(response, bodyText), resetsAtMs };
+        }
+      } catch { /* fall through to default */ }
+    }
+    return super.parseError(response, bodyText);
   }
 
   extractErrorMessage(errorJson, bodyText = "") {

@@ -19,7 +19,7 @@ export async function GET() {
 export async function POST(request) {
   try {
     const body = await request.json();
-    const { name } = body;
+    const { name, providerConnectionId = null } = body;
 
     if (!name) {
       return NextResponse.json({ error: "Name is required" }, { status: 400 });
@@ -27,16 +27,23 @@ export async function POST(request) {
 
     // Always get machineId from server
     const machineId = await getConsistentMachineId();
-    const apiKey = await createApiKey(name, machineId);
+    const apiKey = await createApiKey(name, machineId, providerConnectionId);
 
     return NextResponse.json({
       key: apiKey.key,
       name: apiKey.name,
       id: apiKey.id,
       machineId: apiKey.machineId,
+      providerConnectionId: apiKey.providerConnectionId,
     }, { status: 201 });
   } catch (error) {
     console.log("Error creating key:", error);
+    if (error?.code === "INVALID_ANTIGRAVITY_CONNECTION") {
+      return NextResponse.json({ error: error.message }, { status: 400 });
+    }
+    if (error?.code === "ANTIGRAVITY_KEY_EXISTS" || error?.code === "SQLITE_CONSTRAINT_UNIQUE") {
+      return NextResponse.json({ error: "This Antigravity account already has an API key" }, { status: 409 });
+    }
     return NextResponse.json({ error: "Failed to create key" }, { status: 500 });
   }
 }

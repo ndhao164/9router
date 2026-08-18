@@ -5,6 +5,14 @@ import { formatResetTime } from "./utils";
 
 // Calculate color based on remaining percentage
 const getColorClasses = (remainingPercentage) => {
+  if (!Number.isFinite(remainingPercentage)) {
+    return {
+      text: "text-blue-500",
+      bg: "bg-blue-500",
+      bgLight: "bg-blue-500/10",
+      emoji: "🔵"
+    };
+  }
   if (remainingPercentage > 70) {
     return {
       text: "text-green-500",
@@ -71,8 +79,11 @@ export default function QuotaProgressBar({
   unlimited = false,
   resetTime = null,
   recurring = true,
+  unknown = false,
+  quotaNote = null,
 }) {
-  const colors = getColorClasses(percentage);
+  const isUnknown = unknown || !Number.isFinite(percentage);
+  const colors = getColorClasses(isUnknown ? null : percentage);
   const countdown = formatResetTime(resetTime);
   const resetDisplay = formatResetTimeDisplay(resetTime);
 
@@ -81,7 +92,7 @@ export default function QuotaProgressBar({
   const resetWord = recurring ? "Reset" : "Expires";
 
   // percentage is already remaining percentage (from ProviderLimitCard)
-  const remaining = percentage;
+  const remaining = isUnknown ? null : percentage;
   
   return (
     <div className="space-y-2">
@@ -93,13 +104,13 @@ export default function QuotaProgressBar({
         <div className="flex items-center gap-1.5">
           <span className="text-xs">{colors.emoji}</span>
           <span className={cn("font-medium", colors.text)}>
-            {remaining}%
+            {isUnknown ? "Unknown" : `${remaining}%`}
           </span>
         </div>
       </div>
 
       {/* Progress bar */}
-      {!unlimited && (
+      {!unlimited && !isUnknown && (
         <div className={cn("h-2 rounded-full overflow-hidden", colors.bgLight)}>
           <div
             className={cn("h-full transition-all duration-300", colors.bg)}
@@ -111,7 +122,9 @@ export default function QuotaProgressBar({
       {/* Usage details and countdown */}
       <div className="flex items-center justify-between text-xs text-text-muted">
         <span>
-          {used.toLocaleString()} / {total.toLocaleString()} requests
+          {isUnknown
+            ? (quotaNote || "Daily inference quota is not reported")
+            : `${used.toLocaleString()} / ${total.toLocaleString()} requests`}
         </span>
         {countdown !== "-" && (
           <div className="flex items-center gap-1">

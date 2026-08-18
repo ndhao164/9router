@@ -22,6 +22,9 @@ export default function APIPageClient({ machineId }) {
   const [loading, setLoading] = useState(true);
   const [showAddModal, setShowAddModal] = useState(false);
   const [newKeyName, setNewKeyName] = useState("");
+  const [newKeyConnectionId, setNewKeyConnectionId] = useState("");
+  const [antigravityAccounts, setAntigravityAccounts] = useState([]);
+  const [keyCreateError, setKeyCreateError] = useState("");
   const [createdKey, setCreatedKey] = useState(null);
   const [confirmState, setConfirmState] = useState(null);
 
@@ -262,7 +265,15 @@ export default function APIPageClient({ machineId }) {
         return data.keys || [];
       };
 
-      let existing = await fetchKeys();
+      const [initialKeys, providersRes] = await Promise.all([
+        fetchKeys(),
+        fetch("/api/providers", { cache: "no-store" }),
+      ]);
+      let existing = initialKeys;
+      if (providersRes.ok) {
+        const providersData = await providersRes.json();
+        setAntigravityAccounts((providersData.connections || []).filter((connection) => connection.provider === "antigravity"));
+      }
       // Auto-provision a default key for first-time users so the endpoint works out of the box.
       if (existing.length === 0) {
         try {
@@ -626,10 +637,14 @@ export default function APIPageClient({ machineId }) {
     if (!newKeyName.trim()) return;
 
     try {
+      setKeyCreateError("");
       const res = await fetch("/api/keys", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: newKeyName }),
+        body: JSON.stringify({
+          name: newKeyName,
+          providerConnectionId: newKeyConnectionId || null,
+        }),
       });
       const data = await res.json();
 
@@ -637,10 +652,14 @@ export default function APIPageClient({ machineId }) {
         setCreatedKey(data.key);
         await fetchData();
         setNewKeyName("");
+        setNewKeyConnectionId("");
         setShowAddModal(false);
+      } else {
+        setKeyCreateError(data.error || "Failed to create API key");
       }
     } catch (error) {
       console.log("Error creating key:", error);
+      setKeyCreateError("Failed to create API key");
     }
   };
 
@@ -1039,6 +1058,13 @@ export default function APIPageClient({ machineId }) {
                   <p className="text-xs text-text-muted mt-1">
                     Created {new Date(key.createdAt).toLocaleDateString()}
                   </p>
+                  {key.providerConnectionId && (
+                    <p className="text-xs text-primary mt-1">
+                      Antigravity: {antigravityAccounts.find((account) => account.id === key.providerConnectionId)?.name
+                        || antigravityAccounts.find((account) => account.id === key.providerConnectionId)?.email
+                        || key.providerConnectionId.slice(0, 8)}
+                    </p>
+                  )}
                   {key.isActive === false && (
                     <p className="text-xs text-orange-500 mt-1">Paused</p>
                   )}
@@ -1083,6 +1109,8 @@ export default function APIPageClient({ machineId }) {
         onClose={() => {
           setShowAddModal(false);
           setNewKeyName("");
+          setNewKeyConnectionId("");
+          setKeyCreateError("");
         }}
       >
         <div className="flex flex-col gap-4">
@@ -1092,6 +1120,29 @@ export default function APIPageClient({ machineId }) {
             onChange={(e) => setNewKeyName(e.target.value)}
             placeholder="Production Key"
           />
+          <div>
+            <label className="mb-1.5 block text-sm font-medium text-text-main">Antigravity account</label>
+            <select
+              value={newKeyConnectionId}
+              onChange={(event) => setNewKeyConnectionId(event.target.value)}
+              className="w-full rounded-lg border border-border bg-bg px-3 py-2.5 text-sm text-text-main outline-none transition-colors focus:border-primary"
+            >
+              <option value="">General key (no account binding)</option>
+              {antigravityAccounts.map((account) => {
+                const alreadyBound = keys.some((key) => key.providerConnectionId === account.id);
+                const label = account.name || account.email || account.displayName || account.id.slice(0, 8);
+                return (
+                  <option key={account.id} value={account.id} disabled={alreadyBound}>
+                    {label}{alreadyBound ? " — key already created" : ""}
+                  </option>
+                );
+              })}
+            </select>
+            <p className="mt-1.5 text-xs text-text-muted">
+              A bound key always proxies through this account and never falls back to another account.
+            </p>
+          </div>
+          {keyCreateError && <p className="text-sm text-red-500">{keyCreateError}</p>}
           <div className="flex gap-2">
             <Button onClick={handleCreateKey} fullWidth disabled={!newKeyName.trim()}>
               Create
@@ -1100,6 +1151,8 @@ export default function APIPageClient({ machineId }) {
               onClick={() => {
                 setShowAddModal(false);
                 setNewKeyName("");
+                setNewKeyConnectionId("");
+                setKeyCreateError("");
               }}
               variant="ghost"
               fullWidth

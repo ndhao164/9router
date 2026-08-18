@@ -5,7 +5,6 @@ import Card from "@/shared/components/Card";
 import ProviderIcon from "@/shared/components/ProviderIcon";
 import Badge from "@/shared/components/Badge";
 import QuotaProgressBar from "./QuotaProgressBar";
-import { calculatePercentage } from "./utils";
 
 const planVariants = {
   free: "default",
@@ -150,11 +149,11 @@ export default function ProviderLimitCard({
         <div className="space-y-4">
           {quotas.map((quota, index) => {
             // For Antigravity, use remainingPercentage if available, otherwise calculate
-            const percentage =
-              quota.remainingPercentage !== undefined
-                ? Math.round(((quota.total - quota.used) / quota.total) * 100)
-                : calculatePercentage(quota.used, quota.total);
-            const unlimited = quota.total === 0 || quota.total === null;
+            const unknown = quota.quotaStatus === "unknown" || !Number.isFinite(quota.remainingPercentage);
+            const percentage = unknown
+              ? null
+              : Math.round(quota.remainingPercentage);
+            const unlimited = !unknown && (quota.total === 0 || quota.total === null);
 
             return (
               <QuotaProgressBar
@@ -166,6 +165,8 @@ export default function ProviderLimitCard({
                 unlimited={unlimited}
                 resetTime={quota.resetAt}
                 recurring={quota.recurring !== false}
+                unknown={unknown}
+                quotaNote={quota.quotaNote}
               />
             );
           })}

@@ -1,12 +1,23 @@
+name: 9router
+
 services:
   9router:
-    image: decolua/9router:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        NODE_IMAGE: ${NODE_IMAGE:-node:22-alpine}
+    image: 9router-local:${IMAGE_TAG:-latest}
     container_name: 9router
-    restart: always
+    restart: unless-stopped
+    init: true
+
     ports:
-      - "20128:20128"
+      - "${BIND_ADDRESS:-0.0.0.0}:${HOST_PORT:-20128}:20128"
+
     volumes:
       - 9router-data:/app/data
+
     env_file:
       - .env
     environment:
@@ -15,15 +26,23 @@ services:
       HOSTNAME: "0.0.0.0"
       NODE_ENV: production
       HEADROOM_URL: http://headroom:8787
-    depends_on:
-      - headroom
+
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:20128/api/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+    stop_grace_period: 30s
 
   headroom:
     image: ghcr.io/chopratejas/headroom:latest
-    container_name: headroom
-    restart: always
-    ports:
-      - "8787:8787"
+    container_name: 9router-headroom
+    restart: unless-stopped
+    profiles: ["headroom"]
+    expose:
+      - "8787"
 
 volumes:
   9router-data:

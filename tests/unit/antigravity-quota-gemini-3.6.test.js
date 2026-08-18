@@ -28,6 +28,16 @@ const proxyAwareFetch = vi.fn(async (url) => ({
             isInternal: true,
             quotaInfo: { remainingFraction: 0.5 },
           },
+          "gemini-3.1-flash-lite": {
+            displayName: "Gemini 3.1 Flash Lite",
+            maxTokens: 1048576,
+            maxOutputTokens: 65535,
+            quotaInfo: { resetTime: "2026-07-25T12:00:00Z" },
+          },
+          "explicitly-depleted-model": {
+            displayName: "Explicitly depleted",
+            quotaInfo: { remainingFraction: 0, resetTime: "2026-07-25T12:00:00Z" },
+          },
         },
       },
   text: async () => "{}",
@@ -63,17 +73,31 @@ describe("Antigravity quota tracker: Gemini 3.6 Flash usage bars", () => {
     });
   });
 
-  it("still filters out internal and non-important models", async () => {
+  it("includes newly discovered public models and filters only internal models", async () => {
     const { getAntigravityUsage } = await import("../../open-sse/services/usage/google.js");
 
     const usage = await getAntigravityUsage("access-token", {});
 
     expect(usage.quotas).not.toHaveProperty("internal-model");
-    expect(Object.keys(usage.quotas)).toEqual([
-      "gemini-3.6-flash-high",
-      "gemini-3.6-flash-medium",
-      "gemini-3.6-flash-low",
-      "gemini-3.5-flash-low",
-    ]);
+    expect(usage.quotas["gemini-3.1-flash-lite"]).toMatchObject({
+      remainingPercentage: null,
+      used: null,
+      total: null,
+      quotaStatus: "unknown",
+      contextLength: 1048576,
+      maxOutputTokens: 65535,
+    });
+    expect(usage.models).toContainEqual(expect.objectContaining({
+      id: "gemini-3.1-flash-lite",
+      name: "Gemini 3.1 Flash Lite",
+      discovered: true,
+    }));
+    expect(usage.models.some((model) => model.id === "internal-model")).toBe(false);
+    expect(usage.quotas["explicitly-depleted-model"]).toMatchObject({
+      remainingPercentage: 0,
+      used: 1000,
+      total: 1000,
+      quotaStatus: "reported",
+    });
   });
 });

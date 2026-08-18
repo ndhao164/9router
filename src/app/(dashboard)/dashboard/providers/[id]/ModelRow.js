@@ -28,6 +28,11 @@ export default function ModelRow({ model, fullModel, alias, copied, onCopy, test
           <code className="max-w-[72vw] truncate rounded bg-sidebar px-1.5 py-0.5 font-mono text-xs text-text-muted sm:max-w-[360px]">{displayModel}</code>
           <span className="flex min-w-0 items-center text-[9px] gap-1 pl-1">
             {model.name && <span className="truncate text-[9px] italic text-text-muted/70">{model.name}</span>}
+            {model.discovered && (
+              <span className="shrink-0 rounded bg-primary/10 px-1 py-0.5 text-[8px] font-medium not-italic text-primary">
+                Cloud Code{model.availableAccountCount > 1 ? ` · ${model.availableAccountCount} accounts` : ""}
+              </span>
+            )}
             <CapacityBadges caps={caps} colorOverride="text-text-muted/70" size={12} />
           </span>
         </div>
@@ -85,6 +90,9 @@ export default function ModelRow({ model, fullModel, alias, copied, onCopy, test
 ModelRow.propTypes = {
   model: PropTypes.shape({
     id: PropTypes.string.isRequired,
+    name: PropTypes.string,
+    discovered: PropTypes.bool,
+    availableAccountCount: PropTypes.number,
   }).isRequired,
   fullModel: PropTypes.string.isRequired,
   alias: PropTypes.string,

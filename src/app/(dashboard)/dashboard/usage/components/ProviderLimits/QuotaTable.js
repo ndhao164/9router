@@ -43,6 +43,14 @@ function formatResetTimeDisplay(resetTime) {
  * Get color classes based on remaining percentage
  */
 function getColorClasses(remainingPercentage) {
+  if (!Number.isFinite(remainingPercentage)) {
+    return {
+      text: "text-blue-600 dark:text-blue-400",
+      bg: "bg-blue-500",
+      bgLight: "bg-blue-500/10 border-blue-500/20",
+      emoji: "🔵",
+    };
+  }
   if (remainingPercentage > 70) {
     return {
       text: "text-green-600 dark:text-green-400",
@@ -71,11 +79,19 @@ function getColorClasses(remainingPercentage) {
 
 function sortQuotas(quotas, sortMode) {
   if (sortMode === "remaining-asc") {
-    return [...quotas].sort((a, b) => a.remaining - b.remaining || a.name.localeCompare(b.name));
+    return [...quotas].sort((a, b) => {
+      if (a.remaining === null) return b.remaining === null ? a.name.localeCompare(b.name) : 1;
+      if (b.remaining === null) return -1;
+      return a.remaining - b.remaining || a.name.localeCompare(b.name);
+    });
   }
 
   if (sortMode === "remaining-desc") {
-    return [...quotas].sort((a, b) => b.remaining - a.remaining || a.name.localeCompare(b.name));
+    return [...quotas].sort((a, b) => {
+      if (a.remaining === null) return b.remaining === null ? a.name.localeCompare(b.name) : 1;
+      if (b.remaining === null) return -1;
+      return b.remaining - a.remaining || a.name.localeCompare(b.name);
+    });
   }
 
   return quotas;
@@ -150,6 +166,7 @@ export default function QuotaTable({
 
       <div className="space-y-px">
         {currentPageRows.map((quota) => {
+          const isUnknown = quota.remaining === null;
           const colors = getColorClasses(quota.remaining);
           const countdown = formatResetTime(quota.resetAt);
           const resetDisplay = formatResetTimeDisplay(quota.resetAt);
@@ -174,24 +191,28 @@ export default function QuotaTable({
 
               {/* Progress + used/total */}
               <div className={`min-w-0 flex-1 ${compact ? "space-y-1" : "space-y-1.5"}`}>
-                <div className={`${compact ? "h-1" : "h-1.5"} rounded-full overflow-hidden border ${colors.bgLight} ${
-                  quota.remaining === 0 ? "border-black/10 dark:border-white/10" : "border-transparent"
-                }`}>
-                  <div
-                    className={`h-full transition-all duration-300 ${colors.bg}`}
-                    style={{ width: `${Math.min(quota.remaining, 100)}%` }}
-                  />
-                </div>
+                {isUnknown ? (
+                  <div className={`${compact ? "h-1" : "h-1.5"} rounded-full border border-dashed ${colors.bgLight}`} />
+                ) : (
+                  <div className={`${compact ? "h-1" : "h-1.5"} rounded-full overflow-hidden border ${colors.bgLight} ${
+                    quota.remaining === 0 ? "border-black/10 dark:border-white/10" : "border-transparent"
+                  }`}>
+                    <div
+                      className={`h-full transition-all duration-300 ${colors.bg}`}
+                      style={{ width: `${Math.min(quota.remaining, 100)}%` }}
+                    />
+                  </div>
+                )}
 
                 <div className={`flex items-center justify-between gap-1 min-w-0 ${compact ? "text-[10px]" : "text-xs"}`}>
                   <span
                     className="text-text-muted truncate"
-                    title={`${quota.used.toLocaleString()} / ${quota.total > 0 ? quota.total.toLocaleString() : "∞"}`}
+                    title={isUnknown ? (quota.quotaNote || "Daily inference quota is not reported") : `${quota.used.toLocaleString()} / ${quota.total.toLocaleString()}`}
                   >
-                    {quota.used.toLocaleString()} / {quota.total > 0 ? quota.total.toLocaleString() : "∞"}
+                    {isUnknown ? "Daily endpoint may still work" : `${quota.used.toLocaleString()} / ${quota.total.toLocaleString()}`}
                   </span>
                   <span className={`font-medium ${colors.text} shrink-0`}>
-                    {quota.remaining}%
+                    {isUnknown ? "Unknown" : `${quota.remaining}%`}
                   </span>
                 </div>
               </div>

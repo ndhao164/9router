@@ -210,6 +210,7 @@ export async function deleteProviderConnection(id) {
   db.transaction(() => {
     const row = db.get(`SELECT provider FROM providerConnections WHERE id = ?`, [id]);
     if (!row) return;
+    db.run(`DELETE FROM apiKeys WHERE providerConnectionId = ?`, [id]);
     db.run(`DELETE FROM providerConnections WHERE id = ?`, [id]);
     reorderInTx(db, row.provider);
     ok = true;
@@ -220,7 +221,10 @@ export async function deleteProviderConnection(id) {
 export async function deleteProviderConnectionsByProvider(providerId) {
   const db = await getAdapter();
   const before = db.get(`SELECT COUNT(*) AS n FROM providerConnections WHERE provider = ?`, [providerId]);
-  db.run(`DELETE FROM providerConnections WHERE provider = ?`, [providerId]);
+  db.transaction(() => {
+    db.run(`DELETE FROM apiKeys WHERE providerConnectionId IN (SELECT id FROM providerConnections WHERE provider = ?)`, [providerId]);
+    db.run(`DELETE FROM providerConnections WHERE provider = ?`, [providerId]);
+  });
   return before?.n || 0;
 }
 

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { getProviderConnectionById } from "@/models";
 import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider } from "@/shared/constants/providers";
-import { GEMINI_CONFIG } from "@/lib/oauth/constants/oauth";
+import { ANTIGRAVITY_CONFIG, GEMINI_CONFIG } from "@/lib/oauth/constants/oauth";
 import { refreshGoogleToken, refreshCodexToken, updateProviderCredentials } from "@/sse/services/tokenRefresh";
 import { resolveOllamaLocalHost } from "open-sse/config/providers.js";
 import { getModelsByProviderId } from "open-sse/config/providerModels.js";
@@ -11,6 +11,7 @@ import { resolveQoderModels } from "open-sse/services/qoderModels.js";
 import { resolveGrokCliModels } from "open-sse/services/grokCliModels.js";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { resolveCursorModels } from "open-sse/services/cursorModels.js";
+import { getAntigravityUsage } from "open-sse/services/usage/google.js";
 
 const GEMINI_CLI_MODELS_URL = "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
 
@@ -161,13 +162,50 @@ const PROVIDER_MODELS_CONFIG = {
     })
   },
   antigravity: {
-    url: "https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:models",
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    authHeader: "Authorization",
-    authPrefix: "Bearer ",
-    body: {},
-    parseResponse: (data) => data.models || []
+    customResolver: async (connection) => {
+      if (!connection.accessToken) {
+        return { error: "No valid token found", status: 401 };
+      }
+
+      const proxy = await resolveConnectionProxyConfig(connection.providerSpecificData || {});
+      const proxyOptions = {
+        connectionProxyEnabled: proxy.connectionProxyEnabled === true,
+        connectionProxyUrl: proxy.connectionProxyUrl || "",
+        connectionNoProxy: proxy.connectionNoProxy || "",
+        vercelRelayUrl: proxy.vercelRelayUrl || "",
+        strictProxy: false,
+      };
+      const providerData = {
+        ...(connection.providerSpecificData || {}),
+        ...(connection.projectId ? { projectId: connection.projectId } : {}),
+      };
+
+      let usage = await getAntigravityUsage(connection.accessToken, providerData, proxyOptions);
+      const authFailed = /expired|authentication|unauthorized|401/i.test(usage?.message || "");
+      if (authFailed && connection.refreshToken) {
+        const refreshed = await refreshGoogleToken(
+          connection.refreshToken,
+          ANTIGRAVITY_CONFIG.clientId,
+          ANTIGRAVITY_CONFIG.clientSecret,
+        );
+        if (refreshed?.accessToken) {
+          await updateProviderCredentials(connection.id, {
+            accessToken: refreshed.accessToken,
+            refreshToken: refreshed.refreshToken || connection.refreshToken,
+            expiresIn: refreshed.expiresIn,
+          });
+          usage = await getAntigravityUsage(refreshed.accessToken, providerData, proxyOptions);
+        }
+      }
+
+      if (Array.isArray(usage?.models) && usage.models.length > 0) {
+        return { models: usage.models };
+      }
+      return {
+        models: getStaticProviderModels("antigravity"),
+        warning: usage?.message || "Cloud Code returned no public models; using static catalog.",
+      };
+    },
   },
   github: {
     url: "https://api.githubcopilot.com/models",

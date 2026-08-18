@@ -146,7 +146,15 @@ export default function ProviderDetailPage() {
   const staticModels = getModelsByProviderId(providerId);
   const models = providerId === "cursor" && liveModels.length > 0
     ? liveModels
-    : staticModels;
+    : providerId === "antigravity" && liveModels.length > 0
+      ? [
+          ...staticModels.map((model) => {
+            const live = liveModels.find((item) => item.id === model.id);
+            return live ? { ...live, ...model, name: live.name || model.name } : model;
+          }),
+          ...liveModels.filter((model) => !staticModels.some((item) => item.id === model.id)),
+        ]
+      : staticModels;
   const providerAlias = getProviderAlias(providerId);
   
   const isOpenAICompatible = isOpenAICompatibleProvider(providerId);
@@ -458,28 +466,45 @@ export default function ProviderDetailPage() {
     fetchDisabledModels();
   }, [fetchConnections, fetchAliases, fetchCustomModels, fetchDisabledModels]);
 
-  // Cursor's model availability is account-specific and changes frequently.
+  // Cursor and Antigravity model availability is account-specific and changes frequently.
   // Load the active account's live catalog for the dashboard; the static
   // registry remains the fallback while the request is pending or unavailable.
   useEffect(() => {
-    if (providerId !== "cursor") {
+    if (providerId !== "cursor" && providerId !== "antigravity") {
       setLiveModels([]);
       return;
     }
 
-    const connection = connections.find((item) => item.isActive !== false);
-    if (!connection?.id) {
+    const activeConnections = connections.filter((item) => item.isActive !== false);
+    const targets = providerId === "antigravity"
+      ? activeConnections
+      : activeConnections.slice(0, 1);
+    if (targets.length === 0) {
       setLiveModels([]);
       return;
     }
 
     let cancelled = false;
-    fetch(`/api/providers/${connection.id}/models`, { cache: "no-store" })
-      .then(async (res) => ({ ok: res.ok, data: await res.json() }))
-      .then(({ ok, data }) => {
-        if (!cancelled && ok && Array.isArray(data.models) && data.models.length > 0) {
-          setLiveModels(data.models);
+    Promise.all(targets.map((connection) =>
+      fetch(`/api/providers/${connection.id}/models`, { cache: "no-store" })
+        .then(async (res) => ({ ok: res.ok, data: await res.json() }))
+        .catch(() => ({ ok: false, data: null }))))
+      .then((results) => {
+        if (cancelled) return;
+        const byId = new Map();
+        for (const { ok, data } of results) {
+          if (!ok || !Array.isArray(data?.models)) continue;
+          for (const model of data.models) {
+            if (!model?.id) continue;
+            const existing = byId.get(model.id);
+            byId.set(model.id, {
+              ...(existing || {}),
+              ...model,
+              availableAccountCount: (existing?.availableAccountCount || 0) + 1,
+            });
+          }
         }
+        setLiveModels([...byId.values()]);
       })
       .catch(() => {});
 

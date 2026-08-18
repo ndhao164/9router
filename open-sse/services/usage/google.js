@@ -156,46 +156,49 @@ export async function getAntigravityUsage(accessToken, providerSpecificData, pro
 
     const data = await response.json();
     const quotas = {};
+    const models = [];
 
-    // Parse model quotas (inspired by vscode-antigravity-cockpit)
+    // Cloud Code is the source of truth for account-specific model availability.
+    // Keep every public model instead of filtering through the static registry: new,
+    // experimental and account-gated models can be callable before 9Router ships a
+    // catalog entry for them.
     if (data.models) {
-      // Filter only recommended/important models (must match PROVIDER_MODELS ag ids)
-      const importantModels = [
-        'gemini-3.7-flash-high',
-        'gemini-3.7-flash-medium',
-        'gemini-3.7-flash-low',
-        'gemini-3.6-flash-high',
-        'gemini-3.6-flash-medium',
-        'gemini-3.6-flash-low',
-        'gemini-3.5-flash-low',
-        'gemini-3.5-flash-extra-low',
-        'gemini-pro-agent',
-        'gemini-3.1-pro-low',
-        'claude-sonnet-4-6',
-        'claude-opus-4-6-thinking',
-        'gpt-oss-120b-medium',
-        // Image generation models
-        'gemini-3.1-flash-image',
-      ];
-
       for (const [modelKey, info] of Object.entries(data.models)) {
-        // Skip models without quota info
-        if (!info.quotaInfo) {
-          continue;
-        }
+        if (info?.isInternal) continue;
 
-        // Skip internal models and non-important models
-        if (info.isInternal || !importantModels.includes(modelKey)) {
-          continue;
-        }
+        const isImage = /image|imagen|image-generation/i.test(modelKey);
+        models.push({
+          id: modelKey,
+          name: info?.displayName || modelKey,
+          contextLength: info?.maxTokens || null,
+          maxOutputTokens: info?.maxOutputTokens || null,
+          upstreamModelId: info?.model || null,
+          apiProvider: info?.apiProvider || null,
+          modelProvider: info?.modelProvider || null,
+          kind: isImage ? "image" : "llm",
+          discovered: true,
+          hasQuota: !!info?.quotaInfo,
+        });
 
-        const remainingFraction = info.quotaInfo.remainingFraction || 0;
-        const remainingPercentage = remainingFraction * 100;
+        if (!info?.quotaInfo) continue;
+
+        // Do not infer exhaustion from an omitted remainingFraction. The production
+        // control-plane can return only resetTime while the daily inference endpoint
+        // still serves requests. Only an explicit numeric fraction is authoritative.
+        const rawRemainingFraction = info.quotaInfo.remainingFraction;
+        const hasRemainingFraction = Object.prototype.hasOwnProperty.call(info.quotaInfo, "remainingFraction")
+          && rawRemainingFraction !== null
+          && rawRemainingFraction !== ""
+          && Number.isFinite(Number(rawRemainingFraction));
+        const remainingFraction = hasRemainingFraction
+          ? Math.max(0, Math.min(1, Number(rawRemainingFraction)))
+          : null;
+        const remainingPercentage = remainingFraction === null ? null : remainingFraction * 100;
 
         // Convert percentage to used/total for UI compatibility
-        const total = 1000; // Normalized base
-        const remaining = Math.round(total * remainingFraction);
-        const used = total - remaining;
+        const total = remainingFraction === null ? null : 1000; // normalized percentage base
+        const remaining = remainingFraction === null ? null : Math.round(total * remainingFraction);
+        const used = remainingFraction === null ? null : total - remaining;
 
         // Use modelKey as key (matches PROVIDER_MODELS id)
         quotas[modelKey] = {
@@ -205,6 +208,13 @@ export async function getAntigravityUsage(accessToken, providerSpecificData, pro
           remainingPercentage,
           unlimited: false,
           displayName: info.displayName || modelKey,
+          contextLength: info.maxTokens || null,
+          maxOutputTokens: info.maxOutputTokens || null,
+          discovered: true,
+          quotaStatus: remainingFraction === null ? "unknown" : "reported",
+          quotaNote: remainingFraction === null
+            ? "Cloud Code did not report remainingFraction; daily inference may still be available."
+            : null,
         };
       }
     }
@@ -212,6 +222,7 @@ export async function getAntigravityUsage(accessToken, providerSpecificData, pro
     return {
       plan: subscriptionInfo?.currentTier?.name || "Unknown",
       quotas,
+      models,
       subscriptionInfo,
     };
   } catch (error) {

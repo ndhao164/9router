@@ -2,6 +2,8 @@
 import { describe, it, expect } from "vitest";
 import { AntigravityExecutor } from "../../open-sse/executors/antigravity.js";
 import antigravity from "../../open-sse/providers/registry/antigravity.js";
+import { formatRetryAfter, resolveRetryAfter } from "../../open-sse/services/accountFallback.js";
+import { formatResetTimeSeconds, unavailableResponse } from "../../open-sse/utils/error.js";
 
 const MAX = 10000;
 function res(status, headers = {}, body = null) {
@@ -26,6 +28,75 @@ describe("antigravity computeRetryDelay hook (D3)", () => {
   it("parses retry time from error body when no header", async () => {
     const r = res(429, {}, { error: { message: "quota will reset after 3s" } });
     expect(await ag.computeRetryDelay(r, 1)).toBe(3000);
+  });
+
+  it("extracts Google's precise quota reset timestamp for account cooldown", () => {
+    const resetAt = Date.now() + 29 * 60 * 1000;
+    const body = JSON.stringify({
+      error: {
+        code: 429,
+        message: "You have exhausted your capacity on this model. Your quota will reset after 29m4s.",
+        details: [
+          {
+            "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+            metadata: {
+              quotaResetDelay: "29m4.338700336s",
+              quotaResetTimeStamp: new Date(resetAt).toISOString(),
+            },
+          },
+          {
+            "@type": "type.googleapis.com/google.rpc.RetryInfo",
+            retryDelay: "1744.338700336s",
+          },
+        ],
+      },
+    });
+
+    expect(ag.parseError({ status: 429 }, body).resetsAtMs).toBe(resetAt);
+  });
+
+  it("parses fractional Google retry durations", () => {
+    expect(ag.parseGoogleDuration("29m4.338700336s")).toBe(1_744_339);
+    expect(ag.parseGoogleDuration("1744.338700336s")).toBe(1_744_339);
+  });
+
+  it("keeps the current 1h31m42s reset instead of another account's 12m lock", () => {
+    const now = Date.now();
+    const otherAccountReset = new Date(now + 12 * 60 * 1000).toISOString();
+    const currentErrorReset = now + (60 + 31) * 60 * 1000 + 42_000;
+
+    expect(resolveRetryAfter(otherAccountReset, currentErrorReset, now))
+      .toBe(new Date(currentErrorReset).toISOString());
+    expect(formatRetryAfter(new Date(currentErrorReset + 711).toISOString(), now))
+      .toBe("reset after 1h 31m 42s");
+  });
+
+  it("returns the 429 reset duration as total seconds in error.time", async () => {
+    const now = Date.now();
+    const retryAfter = new Date(now + 5_502_711).toISOString();
+    expect(formatResetTimeSeconds(retryAfter, now)).toBe("5502s");
+
+    const response = unavailableResponse(
+      429,
+      "[antigravity/gemini-3.1-flash-lite] quota exhausted",
+      retryAfter,
+      "reset after 1h 31m 42s",
+    );
+
+    const body = await response.json();
+    expect(body.error.time).toBe("5502s");
+    expect(body.error.message).toContain("reset after 1h 31m 42s");
+  });
+
+  it("does not add error.time to non-429 unavailable responses", async () => {
+    const response = unavailableResponse(
+      503,
+      "temporarily unavailable",
+      new Date(Date.now() + 30_000).toISOString(),
+      "reset after 30s",
+    );
+
+    expect((await response.json()).error).not.toHaveProperty("time");
   });
 
   it("exponential backoff for 429 when no retry info", async () => {

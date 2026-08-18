@@ -1,6 +1,6 @@
-import { getProviderConnections, validateApiKey, updateProviderConnection, getSettings, getProxyPools } from "@/lib/localDb";
+import { getProviderConnections, getApiKeyByValue, validateApiKey, updateProviderConnection, getSettings, getProxyPools } from "@/lib/localDb";
 import { resolveConnectionProxyConfig, pickProxyPoolId } from "@/lib/network/connectionProxy";
-import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockUpdate, getEarliestModelLockUntil } from "open-sse/services/accountFallback.js";
+import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockUpdate, getModelLockUntil } from "open-sse/services/accountFallback.js";
 import { MAX_RATE_LIMIT_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
 import { resolveProviderId, FREE_PROVIDERS } from "@/shared/constants/providers.js";
 import * as log from "../utils/logger.js";
@@ -9,6 +9,7 @@ import * as log from "../utils/logger.js";
 let selectionMutex = Promise.resolve();
 
 const GITHUB_MONTHLY_USAGE_LIMIT = "you've reached your additional usage limit for your plan";
+const MAX_STORED_PROVIDER_ERROR_LENGTH = 16 * 1024;
 
 function githubMonthlyResetMs(status, errorText, provider) {
   if (resolveProviderId(provider) !== "github" || Number(status) !== 402) return null;
@@ -30,6 +31,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     ? excludeConnectionIds
     : (excludeConnectionIds ? new Set([excludeConnectionIds]) : new Set());
   const preferredConnectionId = options?.preferredConnectionId || null;
+  const requiredConnectionId = options?.requiredConnectionId || null;
   // Acquire mutex to prevent race conditions
   const currentMutex = selectionMutex;
   let resolveMutex;
@@ -76,31 +78,40 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       return null;
     }
 
+    // A bound API key may only observe and select its own account. This scope
+    // also applies to retry timing below; another account's reset is irrelevant.
+    const scopedConnections = requiredConnectionId
+      ? connections.filter(c => c.id === requiredConnectionId)
+      : connections;
+
     // Filter out model-locked and excluded connections
-    const availableConnections = connections.filter(c => {
+    const availableConnections = scopedConnections.filter(c => {
       if (excludeSet.has(c.id)) return false;
       if (isModelLockActive(c, model)) return false;
       return true;
     });
 
-    log.debug("AUTH", `${provider} | available: ${availableConnections.length}/${connections.length}`);
-    connections.forEach(c => {
+    log.debug("AUTH", `${provider} | available: ${availableConnections.length}/${scopedConnections.length}`);
+    scopedConnections.forEach(c => {
       const excluded = excludeSet.has(c.id);
       const locked = isModelLockActive(c, model);
       if (excluded || locked) {
-        const lockUntil = getEarliestModelLockUntil(c);
+        const lockUntil = getModelLockUntil(c, model);
         log.debug("AUTH", `  → ${c.id?.slice(0, 8)} | ${excluded ? "excluded" : ""} ${locked ? `modelLocked(${model}) until ${lockUntil}` : ""}`);
       }
     });
 
     if (availableConnections.length === 0) {
       // Find earliest lock expiry across all connections for retry timing
-      const lockedConns = connections.filter(c => isModelLockActive(c, model));
-      const expiries = lockedConns.map(c => getEarliestModelLockUntil(c)).filter(Boolean);
-      const earliest = expiries.sort()[0] || null;
-      if (earliest) {
-        const earliestConn = lockedConns[0];
-        log.warn("AUTH", `${provider} | all ${connections.length} accounts locked for ${model || "all"} (${formatRetryAfter(earliest)}) | lastError=${earliestConn?.lastError?.slice(0, 50)}`);
+      const locks = scopedConnections
+        .filter(c => isModelLockActive(c, model))
+        .map(conn => ({ conn, expiry: getModelLockUntil(conn, model) }))
+        .filter(lock => lock.expiry)
+        .sort((a, b) => new Date(a.expiry) - new Date(b.expiry));
+      const earliestLock = locks[0] || null;
+      if (earliestLock) {
+        const { conn: earliestConn, expiry: earliest } = earliestLock;
+        log.warn("AUTH", `${provider} | all ${scopedConnections.length} accounts locked for ${model || "all"} (${formatRetryAfter(earliest)}) | lastError=${earliestConn?.lastError?.slice(0, 50)}`);
         return {
           allRateLimited: true,
           retryAfter: earliest,
@@ -120,7 +131,12 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
 
     let connection;
     // Pin to preferred connection if specified and available
-    if (preferredConnectionId) {
+    if (requiredConnectionId) {
+      connection = availableConnections.find((c) => c.id === requiredConnectionId);
+      if (connection) {
+        log.info("AUTH", `${provider} | API key pinned to ${connection.id?.slice(0, 8)} (${connection.name || connection.email || "unnamed"})`);
+      }
+    } else if (preferredConnectionId) {
       connection = availableConnections.find((c) => c.id === preferredConnectionId);
       if (connection) {
         log.info("AUTH", `${provider} | pinned to ${connection.id?.slice(0, 8)} (${connection.name || connection.email || "unnamed"})`);
@@ -218,6 +234,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
  */
 export async function markAccountUnavailable(connectionId, status, errorText, provider = null, model = null, resetsAtMs = null) {
   if (!connectionId || connectionId === "noauth") return { shouldFallback: false, cooldownMs: 0 };
+  const nowMs = Date.now();
   const connections = await getProviderConnections({ provider });
   const conn = connections.find(c => c.id === connectionId);
   const backoffLevel = conn?.backoffLevel || 0;
@@ -229,19 +246,29 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
   let shouldFallback, cooldownMs, newBackoffLevel;
   if (githubResetAtMs) {
     shouldFallback = true;
-    cooldownMs = githubResetAtMs - Date.now();
+    cooldownMs = githubResetAtMs - nowMs;
     newBackoffLevel = 0;
-  } else if (resetsAtMs && resetsAtMs > Date.now()) {
+  } else if (resetsAtMs && resetsAtMs > nowMs) {
     shouldFallback = true;
-    cooldownMs = Math.min(resetsAtMs - Date.now(), MAX_RATE_LIMIT_COOLDOWN_MS);
+    const preciseCooldownMs = resetsAtMs - nowMs;
+    // Antigravity supplies an authoritative quotaResetTimeStamp. Honoring it
+    // avoids retrying every 30 minutes against a quota that may reset hours later.
+    cooldownMs = resolveProviderId(provider) === "antigravity"
+      ? preciseCooldownMs
+      : Math.min(preciseCooldownMs, MAX_RATE_LIMIT_COOLDOWN_MS);
     newBackoffLevel = 0;
   } else {
     ({ shouldFallback, cooldownMs, newBackoffLevel } = checkFallbackError(status, errorText, backoffLevel));
   }
   if (!shouldFallback) return { shouldFallback: false, cooldownMs: 0 };
 
-  const reason = typeof errorText === "string" ? errorText.slice(0, 100) : "Provider error";
-  const lockUpdate = buildModelLockUpdate(githubResetAtMs ? null : model, cooldownMs);
+  const fullError = typeof errorText === "string"
+    ? errorText
+    : (errorText ? JSON.stringify(errorText) : "Provider error");
+  const reason = fullError.length > MAX_STORED_PROVIDER_ERROR_LENGTH
+    ? `${fullError.slice(0, MAX_STORED_PROVIDER_ERROR_LENGTH)}… [truncated]`
+    : fullError;
+  const lockUpdate = buildModelLockUpdate(githubResetAtMs ? null : model, cooldownMs, nowMs);
 
   await updateProviderConnection(connectionId, {
     ...lockUpdate,
@@ -338,4 +365,16 @@ export function extractApiKey(request) {
 export async function isValidApiKey(apiKey) {
   if (!apiKey) return false;
   return await validateApiKey(apiKey);
+}
+
+/** Resolve an active API key and its optional Antigravity account binding. */
+export async function getApiKeyContext(apiKey) {
+  if (!apiKey) return null;
+  const record = await getApiKeyByValue(apiKey);
+  if (!record?.isActive) return null;
+  return {
+    id: record.id,
+    provider: record.providerConnectionId ? "antigravity" : null,
+    providerConnectionId: record.providerConnectionId || null,
+  };
 }

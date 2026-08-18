@@ -105,6 +105,15 @@ export function createErrorResult(statusCode, message, resetsAtMs) {
   };
 }
 
+/** Convert an absolute reset timestamp to a whole-seconds API value. */
+export function formatResetTimeSeconds(retryAfter, nowMs = Date.now()) {
+  const resetAtMs = new Date(retryAfter).getTime();
+  if (!Number.isFinite(resetAtMs)) return "";
+  const remainingMs = resetAtMs - nowMs;
+  if (remainingMs <= 0) return "0s";
+  return `${Math.max(Math.floor(remainingMs / 1000), 1)}s`;
+}
+
 /**
  * Create unavailable response when all accounts are rate limited
  * @param {number} statusCode - Original error status code
@@ -114,10 +123,18 @@ export function createErrorResult(statusCode, message, resetsAtMs) {
  * @returns {Response}
  */
 export function unavailableResponse(statusCode, message, retryAfter, retryAfterHuman) {
-  const retryAfterSec = Math.max(Math.ceil((new Date(retryAfter).getTime() - Date.now()) / 1000), 1);
+  const nowMs = Date.now();
+  const retryAfterSec = Math.max(Math.ceil((new Date(retryAfter).getTime() - nowMs) / 1000), 1);
   const msg = `${message} (${retryAfterHuman})`;
+  const resetTime = Number(statusCode) === 429
+    ? formatResetTimeSeconds(retryAfter, nowMs)
+    : "";
+  const error = {
+    message: msg,
+    ...(resetTime && { time: resetTime }),
+  };
   return new Response(
-    JSON.stringify({ error: { message: msg } }),
+    JSON.stringify({ error }),
     {
       status: statusCode,
       headers: {
