@@ -13,6 +13,35 @@ const ANTIGRAVITY_CONFIG = {
   userAgent: ANTIGRAVITY_IDE_USER_AGENT,
 };
 
+const ANTIGRAVITY_MODEL_NAME_OVERRIDES = Object.freeze({
+  "gemini-2.5-flash": "Gemini 2.5 Flash",
+  "gemini-2.5-flash-lite": "Gemini 2.5 Flash Lite",
+  "gemini-2.5-flash-thinking": "Gemini 2.5 Flash (Thinking)",
+  "gemini-3.1-flash-lite": "Gemini 3.1 Flash Lite",
+  "gemini-pro-agent": "Gemini 3.1 Pro (High)",
+  "gemini-3.1-pro-high": "Gemini 3.1 Pro (High)",
+  "gemini-3-flash-agent": "Gemini 3.5 Flash (High)",
+  "gemini-3.5-flash-high": "Gemini 3.5 Flash (High)",
+});
+
+/**
+ * Resolve a stable Antigravity display name.
+ *
+ * Cloud Code occasionally reports a newer model's displayName for legacy model
+ * IDs, so known IDs must take precedence over the upstream label.
+ */
+export function resolveAntigravityModelName(modelId, upstreamDisplayName) {
+  if (Object.prototype.hasOwnProperty.call(ANTIGRAVITY_MODEL_NAME_OVERRIDES, modelId)) {
+    return ANTIGRAVITY_MODEL_NAME_OVERRIDES[modelId];
+  }
+
+  if (typeof upstreamDisplayName === "string" && upstreamDisplayName.trim()) {
+    return upstreamDisplayName.trim();
+  }
+
+  return modelId;
+}
+
 /**
  * Gemini CLI Usage — fetch per-model quota via Cloud Code Assist API.
  * Uses retrieveUserQuota (same endpoint as `gemini /stats`) returning
@@ -167,9 +196,10 @@ export async function getAntigravityUsage(accessToken, providerSpecificData, pro
         if (info?.isInternal) continue;
 
         const isImage = /image|imagen|image-generation/i.test(modelKey);
+        const displayName = resolveAntigravityModelName(modelKey, info?.displayName);
         models.push({
           id: modelKey,
-          name: info?.displayName || modelKey,
+          name: displayName,
           contextLength: info?.maxTokens || null,
           maxOutputTokens: info?.maxOutputTokens || null,
           upstreamModelId: info?.model || null,
@@ -207,7 +237,7 @@ export async function getAntigravityUsage(accessToken, providerSpecificData, pro
           resetAt: parseResetTime(info.quotaInfo.resetTime),
           remainingPercentage,
           unlimited: false,
-          displayName: info.displayName || modelKey,
+          displayName,
           contextLength: info.maxTokens || null,
           maxOutputTokens: info.maxOutputTokens || null,
           discovered: true,

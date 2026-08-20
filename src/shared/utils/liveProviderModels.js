@@ -87,6 +87,43 @@ export async function fetchLiveProviderModels(
   );
 }
 
+function normalizeModelName(name) {
+  return typeof name === "string"
+    ? name.trim().replace(/\s+/g, " ").toLowerCase()
+    : "";
+}
+
+/**
+ * Preserve distinct model routes that share a display name, but flag them so
+ * selectors can show the route ID as a disambiguating secondary label.
+ */
+export function markDuplicateModelNames(models = []) {
+  const idsByName = new Map();
+
+  for (const model of models) {
+    const normalizedName = normalizeModelName(model?.name);
+    if (!normalizedName || !model?.id) continue;
+
+    if (!idsByName.has(normalizedName)) idsByName.set(normalizedName, new Set());
+    idsByName.get(normalizedName).add(String(model.id));
+  }
+
+  return models.map((model) => {
+    const normalizedName = normalizeModelName(model?.name);
+    const showModelId = (idsByName.get(normalizedName)?.size || 0) > 1;
+
+    if (showModelId) return { ...model, showModelId: true };
+    if (!model?.showModelId) return model;
+
+    const { showModelId: _staleFlag, ...rest } = model;
+    return rest;
+  });
+}
+
+function finalizeProviderModels(providerId, models) {
+  return providerId === "antigravity" ? markDuplicateModelNames(models) : models;
+}
+
 /**
  * Resolve the catalog displayed by a model selector.
  *
@@ -96,7 +133,9 @@ export async function fetchLiveProviderModels(
  */
 export function mergeLiveProviderModels(providerId, staticModels = [], liveModelsByProvider = {}) {
   const liveModels = liveModelsByProvider[providerId];
-  if (!Array.isArray(liveModels) || liveModels.length === 0) return staticModels;
+  if (!Array.isArray(liveModels) || liveModels.length === 0) {
+    return finalizeProviderModels(providerId, staticModels);
+  }
 
   if (LIVE_CATALOG_STRATEGIES[providerId] === "replace") return liveModels;
   if (LIVE_CATALOG_STRATEGIES[providerId] !== "merge") return staticModels;
@@ -114,5 +153,5 @@ export function mergeLiveProviderModels(providerId, staticModels = [], liveModel
     };
   });
 
-  return [...mergedStatic, ...remainingLive.values()];
+  return finalizeProviderModels(providerId, [...mergedStatic, ...remainingLive.values()]);
 }

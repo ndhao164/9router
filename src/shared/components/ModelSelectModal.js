@@ -8,7 +8,12 @@ import CapacityBadges from "./CapacityBadges";
 import { useModelCaps } from "@/shared/hooks/useModelCaps";
 import { getModelsByProviderId, getModelKind } from "@/shared/constants/models";
 import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, FREE_PROVIDERS, FREE_TIER_PROVIDERS, AI_PROVIDERS, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, getProviderAlias } from "@/shared/constants/providers";
-import { fetchLiveProviderModels, mergeLiveProviderModels, serializeLiveModelCatalogTargets } from "@/shared/utils/liveProviderModels";
+import {
+  fetchLiveProviderModels,
+  markDuplicateModelNames,
+  mergeLiveProviderModels,
+  serializeLiveModelCatalogTargets,
+} from "@/shared/utils/liveProviderModels";
 
 // Provider order: OAuth first, then Free Tier, then API Key (matches dashboard/providers)
 const PROVIDER_ORDER = [
@@ -339,7 +344,13 @@ export default function ModelSelectModal({
           .map((m) => ({ id: m.id, name: m.name || m.id, value: `${alias}/${m.id}`, isCustom: true }));
 
         const merged = [
-          ...hardcodedModels.map((m) => ({ id: m.id, name: m.name, value: `${alias}/${m.id}`, kind: getModelKind(m) })),
+          ...hardcodedModels.map((m) => ({
+            id: m.id,
+            name: m.name,
+            value: `${alias}/${m.id}`,
+            kind: getModelKind(m),
+            showModelId: m.showModelId,
+          })),
           ...customAliasModels,
           ...customRegisteredModels,
         ];
@@ -396,8 +407,11 @@ export default function ModelSelectModal({
 
   // Sort models alphabetically, with added models floated to top
   const sortModels = (models) => {
-    const added = models.filter(m => addedModelValues.includes(m.value)).sort((a, b) => a.name.localeCompare(b.name));
-    const rest = models.filter(m => !addedModelValues.includes(m.value)).sort((a, b) => a.name.localeCompare(b.name));
+    const compareModels = (a, b) => (
+      a.name.localeCompare(b.name) || String(a.id).localeCompare(String(b.id))
+    );
+    const added = models.filter(m => addedModelValues.includes(m.value)).sort(compareModels);
+    const rest = models.filter(m => !addedModelValues.includes(m.value)).sort(compareModels);
     return [...added, ...rest];
   };
 
@@ -422,9 +436,12 @@ export default function ModelSelectModal({
         );
         if (models.length === 0 && !providerNameMatches) return;
       }
+      const sortedModels = sortModels(models);
       filtered[providerId] = {
         ...group,
-        models: sortModels(models),
+        models: providerId === "antigravity"
+          ? markDuplicateModelNames(sortedModels)
+          : sortedModels,
       };
     });
 
@@ -543,11 +560,19 @@ export default function ModelSelectModal({
               {group.models.map((model) => {
                 const isSelected = selectedModel === model.value;
                 const isPlaceholder = model.isPlaceholder;
+                const modelLabel = model.showModelId ? (
+                  <span className="flex flex-col items-start leading-tight">
+                    <span>{model.name}</span>
+                    <span className="font-mono text-[9px] font-normal opacity-60">{model.id}</span>
+                  </span>
+                ) : model.name;
                 return (
                   <button
                     key={model.value}
                     onClick={() => handleSelect(model)}
-                    title={isPlaceholder ? "Select to pre-fill, then edit model ID in the input" : undefined}
+                    title={isPlaceholder
+                      ? "Select to pre-fill, then edit model ID in the input"
+                      : model.showModelId ? model.value : undefined}
                     className={`
                       px-2 py-1 rounded-xl text-xs font-medium transition-all border hover:cursor-pointer
                       ${isPlaceholder
@@ -571,13 +596,13 @@ export default function ModelSelectModal({
                         </>
                       ) : model.isCustom ? (
                         <>
-                          {model.name}
+                          {modelLabel}
                           <span className="text-[9px] opacity-60 font-normal">custom</span>
                           <CapacityBadges caps={getCaps(model.value)} />
                         </>
                       ) : (
                         <>
-                          {model.name}
+                          {modelLabel}
                           <CapacityBadges caps={getCaps(model.value)} />
                         </>
                       )}

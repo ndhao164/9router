@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   fetchLiveProviderModels,
   getLiveModelCatalogTargets,
+  markDuplicateModelNames,
   mergeLiveProviderModels,
   serializeLiveModelCatalogTargets,
 } from "@/shared/utils/liveProviderModels.js";
@@ -130,6 +131,59 @@ describe("live provider model catalogs", () => {
       kind: "llm",
       availableAccountCount: 2,
     });
+  });
+
+  it("keeps distinct Antigravity routes and marks duplicate display names", () => {
+    const staticModels = [
+      { id: "gemini-pro-agent", name: "Gemini 3.1 Pro (High)" },
+      { id: "gemini-3-flash-agent", name: "Gemini 3.5 Flash (High)" },
+      { id: "gemini-3.5-flash-high", name: "Gemini 3.5 Flash (High)" },
+      { id: "unique-model", name: "Unique model" },
+    ];
+    const liveModelsByProvider = {
+      antigravity: [
+        { id: "gemini-3.1-pro-high", name: "Gemini 3.1 Pro (High)" },
+      ],
+    };
+
+    const models = mergeLiveProviderModels("antigravity", staticModels, liveModelsByProvider);
+
+    expect(models.map((model) => model.id)).toEqual([
+      "gemini-pro-agent",
+      "gemini-3-flash-agent",
+      "gemini-3.5-flash-high",
+      "unique-model",
+      "gemini-3.1-pro-high",
+    ]);
+    expect(models.filter((model) => model.showModelId).map((model) => model.id)).toEqual([
+      "gemini-pro-agent",
+      "gemini-3-flash-agent",
+      "gemini-3.5-flash-high",
+      "gemini-3.1-pro-high",
+    ]);
+    expect(models.find((model) => model.id === "unique-model")).not.toHaveProperty("showModelId");
+  });
+
+  it("normalizes case and whitespace when detecting duplicate names", () => {
+    const models = markDuplicateModelNames([
+      { id: "route-a", name: "  Gemini   Pro  " },
+      { id: "route-b", name: "gemini pro" },
+      { id: "route-c", name: "Gemini Flash", showModelId: true },
+    ]);
+
+    expect(models[0]).toMatchObject({ id: "route-a", showModelId: true });
+    expect(models[1]).toMatchObject({ id: "route-b", showModelId: true });
+    expect(models[2]).not.toHaveProperty("showModelId");
+  });
+
+  it("marks duplicate names in the static Antigravity fallback catalog", () => {
+    const staticModels = [
+      { id: "route-a", name: "Same name" },
+      { id: "route-b", name: "Same name" },
+    ];
+
+    expect(mergeLiveProviderModels("antigravity", staticModels, {}))
+      .toEqual(staticModels.map((model) => ({ ...model, showModelId: true })));
   });
 
   it("uses Cursor live models as an authoritative replacement", () => {
