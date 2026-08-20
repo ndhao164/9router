@@ -8,6 +8,7 @@ import CapacityBadges from "./CapacityBadges";
 import { useModelCaps } from "@/shared/hooks/useModelCaps";
 import { getModelsByProviderId, getModelKind } from "@/shared/constants/models";
 import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, FREE_PROVIDERS, FREE_TIER_PROVIDERS, AI_PROVIDERS, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, getProviderAlias } from "@/shared/constants/providers";
+import { fetchLiveProviderModels, mergeLiveProviderModels, serializeLiveModelCatalogTargets } from "@/shared/utils/liveProviderModels";
 
 // Provider order: OAuth first, then Free Tier, then API Key (matches dashboard/providers)
 const PROVIDER_ORDER = [
@@ -19,6 +20,7 @@ const PROVIDER_ORDER = [
 
 // Providers that need no auth — always show in model selector
 const NO_AUTH_PROVIDER_IDS = Object.keys(FREE_PROVIDERS).filter(id => FREE_PROVIDERS[id].noAuth);
+const EMPTY_LIVE_PROVIDER_MODELS = Object.freeze({});
 
 export default function ModelSelectModal({
   isOpen,
@@ -49,48 +51,34 @@ export default function ModelSelectModal({
   const [providerNodes, setProviderNodes] = useState([]);
   const [customModels, setCustomModels] = useState([]);
   const [disabledModels, setDisabledModels] = useState({});
-  const [cursorModels, setCursorModels] = useState([]);
+  const [liveModelCatalog, setLiveModelCatalog] = useState({
+    targets: null,
+    models: EMPTY_LIVE_PROVIDER_MODELS,
+  });
+  const liveModelCatalogTargets = serializeLiveModelCatalogTargets(activeProviders);
+  const liveProviderModels = liveModelCatalog.targets === liveModelCatalogTargets
+    ? liveModelCatalog.models
+    : EMPTY_LIVE_PROVIDER_MODELS;
 
-  // Cursor exposes the usable catalog per account. Keep the static catalog only
-  // as a fallback, since it quickly becomes stale and different accounts can
-  // have different model entitlements.
-  const cursorConnectionIds = useMemo(
-    () => activeProviders
-      .filter((provider) => provider.provider === "cursor" && provider.id)
-      .map((provider) => provider.id),
-    [activeProviders],
-  );
-
+  // Cursor and Antigravity expose account-specific catalogs that change faster
+  // than the static registry. Fetch every active account and keep static models
+  // as the provider-specific fallback while loading or when discovery fails.
   useEffect(() => {
-    if (!isOpen || cursorConnectionIds.length === 0) {
-      setCursorModels([]);
-      return undefined;
-    }
+    if (!isOpen) return undefined;
 
     let cancelled = false;
-    Promise.all(cursorConnectionIds.map(async (connectionId) => {
-      const response = await fetch(`/api/providers/${connectionId}/models`, { cache: "no-store" });
-      if (!response.ok) return [];
-      const data = await response.json();
-      return Array.isArray(data.models) ? data.models : [];
-    }))
-      .then((modelLists) => {
-        if (cancelled) return;
-        const seen = new Set();
-        setCursorModels(modelLists.flat().filter((model) => {
-          if (!model?.id || seen.has(model.id)) return false;
-          seen.add(model.id);
-          return true;
-        }));
-      })
-      .catch((error) => {
-        // Do not hide the static fallback when the account catalog is unavailable.
-        console.warn("Unable to load Cursor models for selector:", error);
-        if (!cancelled) setCursorModels([]);
-      });
+    const controller = new AbortController();
+    fetchLiveProviderModels(JSON.parse(liveModelCatalogTargets), { signal: controller.signal }).then((models) => {
+      if (!cancelled) {
+        setLiveModelCatalog({ targets: liveModelCatalogTargets, models });
+      }
+    });
 
-    return () => { cancelled = true; };
-  }, [isOpen, cursorConnectionIds]);
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [isOpen, liveModelCatalogTargets]);
 
   const fetchCombos = async () => {
     try {
@@ -323,9 +311,11 @@ export default function ModelSelectModal({
           hasModels: mergedModels.length > 0,
         };
       } else {
-        const hardcodedModels = providerId === "cursor" && cursorModels.length > 0
-          ? cursorModels
-          : getModelsByProviderId(providerId);
+        const hardcodedModels = mergeLiveProviderModels(
+          providerId,
+          getModelsByProviderId(providerId),
+          liveProviderModels,
+        );
         const hardcodedIds = new Set(hardcodedModels.map((m) => m.id));
 
         // Custom models: if no hardcoded models (e.g. openrouter), show all aliases for this provider
@@ -394,7 +384,7 @@ export default function ModelSelectModal({
     });
 
     return groups;
-  }, [filteredActiveProviders, modelAliases, allProviders, providerNodes, customModels, disabledModels, kindFilter, activeProviders, cursorModels]);
+  }, [filteredActiveProviders, modelAliases, allProviders, providerNodes, customModels, disabledModels, kindFilter, activeProviders, liveProviderModels]);
 
   // Filter combos by search query (and hide combos when kindFilter is set — combos are LLM-only by design)
   const filteredCombos = useMemo(() => {
