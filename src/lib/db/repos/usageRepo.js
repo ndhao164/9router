@@ -15,7 +15,11 @@ const CONN_CACHE_TTL_MS = 30 * 1000;
 const PERIOD_MS = { "24h": 86400000, "7d": 604800000, "30d": 2592000000, "60d": 5184000000 };
 
 // In-memory state shared across Next.js modules
-if (!global._pendingRequests) global._pendingRequests = { byModel: {}, byAccount: {} };
+if (!global._pendingRequests) global._pendingRequests = { byModel: {}, byAccount: {}, byRoute: {} };
+// Hot reload / rolling upgrades can reuse the pre-attribution global shape.
+global._pendingRequests.byModel ||= {};
+global._pendingRequests.byAccount ||= {};
+global._pendingRequests.byRoute ||= {};
 if (!global._lastErrorProvider) global._lastErrorProvider = { provider: "", ts: 0 };
 if (!global._statsEmitter) {
   global._statsEmitter = new EventEmitter();
@@ -60,6 +64,81 @@ function addToCounter(target, key, values) {
   if (values.meta) Object.assign(target[key], values.meta);
 }
 
+function cleanAttributionValue(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function normalizeUsageMeta(entry = {}) {
+  const source = entry.meta && typeof entry.meta === "object" && !Array.isArray(entry.meta)
+    ? entry.meta
+    : {};
+  const requestedModel = cleanAttributionValue(entry.requestedModel ?? source.requestedModel);
+  const comboName = cleanAttributionValue(entry.comboName ?? source.comboName);
+  return {
+    ...(requestedModel ? { requestedModel } : {}),
+    ...(comboName ? { comboName } : {}),
+  };
+}
+
+function mergeComboAggregate(target, comboName, values = {}, fallbackLastUsed = null) {
+  const name = cleanAttributionValue(comboName);
+  if (!name) return;
+
+  if (!target[name]) {
+    target[name] = {
+      comboName: name,
+      requestedModel: cleanAttributionValue(values.requestedModel) || name,
+      requests: 0,
+      promptTokens: 0,
+      completionTokens: 0,
+      cachedTokens: 0,
+      cost: 0,
+      byProvider: {},
+      byModel: {},
+      lastUsed: values.lastUsed || fallbackLastUsed || null,
+    };
+  }
+
+  const combo = target[name];
+  combo.requests += values.requests || 0;
+  combo.promptTokens += values.promptTokens || 0;
+  combo.completionTokens += values.completionTokens || 0;
+  combo.cachedTokens += values.cachedTokens || 0;
+  combo.cost += values.cost || 0;
+  const lastUsed = values.lastUsed || fallbackLastUsed;
+  if (lastUsed && (!combo.lastUsed || new Date(lastUsed) > new Date(combo.lastUsed))) combo.lastUsed = lastUsed;
+
+  for (const [provider, providerValues] of Object.entries(values.byProvider || {})) {
+    addToCounter(combo.byProvider, provider, { ...providerValues, requests: providerValues.requests || 0 });
+  }
+  for (const [modelKey, modelValues] of Object.entries(values.byModel || {})) {
+    addToCounter(combo.byModel, modelKey, {
+      ...modelValues,
+      requests: modelValues.requests || 0,
+      meta: {
+        rawModel: modelValues.rawModel || modelKey.split("|")[0],
+        provider: modelValues.provider || modelKey.split("|")[1] || "unknown",
+      },
+    });
+  }
+}
+
+function addComboEntry(target, entry, values) {
+  const meta = normalizeUsageMeta(entry);
+  if (!meta.comboName) return;
+  const provider = entry.provider || "unknown";
+  const model = entry.model || "unknown";
+  const modelKey = `${model}|${provider}`;
+  mergeComboAggregate(target, meta.comboName, {
+    ...values,
+    requests: values.requests || 1,
+    requestedModel: meta.requestedModel || meta.comboName,
+    lastUsed: entry.timestamp || null,
+    byProvider: { [provider]: values },
+    byModel: { [modelKey]: { ...values, rawModel: model, provider } },
+  });
+}
+
 function aggregateEntryToDay(day, entry) {
   const promptTokens = entry.tokens?.prompt_tokens || entry.tokens?.input_tokens || 0;
   const completionTokens = entry.tokens?.completion_tokens || entry.tokens?.output_tokens || 0;
@@ -78,6 +157,7 @@ function aggregateEntryToDay(day, entry) {
   day.byAccount ||= {};
   day.byApiKey ||= {};
   day.byEndpoint ||= {};
+  day.byCombo ||= {};
 
   if (entry.provider) addToCounter(day.byProvider, entry.provider, vals);
 
@@ -95,6 +175,8 @@ function aggregateEntryToDay(day, entry) {
   const endpoint = entry.endpoint || "Unknown";
   const epKey = `${endpoint}|${entry.model}|${entry.provider || "unknown"}`;
   addToCounter(day.byEndpoint, epKey, { ...vals, meta: { endpoint, rawModel: entry.model, provider: entry.provider } });
+
+  addComboEntry(day.byCombo, entry, { ...vals, requests: 1 });
 }
 
 function pushToRing(entry) {
@@ -122,11 +204,12 @@ async function ensureRingInitialized() {
   recentRing.initialized = true;
   try {
     const db = await getAdapter();
-    const rows = db.all(`SELECT timestamp, provider, model, connectionId, apiKey, endpoint, cost, status, tokens FROM usageHistory ORDER BY id DESC LIMIT ?`, [RING_CAP]);
+    const rows = db.all(`SELECT timestamp, provider, model, connectionId, apiKey, endpoint, cost, status, tokens, meta FROM usageHistory ORDER BY id DESC LIMIT ?`, [RING_CAP]);
     recentRing.items = rows.reverse().map((r) => ({
       timestamp: r.timestamp, provider: r.provider, model: r.model, connectionId: r.connectionId,
       apiKey: r.apiKey, endpoint: r.endpoint, cost: r.cost, status: r.status,
       tokens: parseJson(r.tokens, {}),
+      meta: parseJson(r.meta, {}),
     }));
   } catch {}
 }
@@ -149,23 +232,114 @@ async function calculateCost(provider, model, tokens) {
   }
 }
 
-export function trackPendingRequest(model, provider, connectionId, started, error = false) {
-  const modelKey = provider ? `${model} (${provider})` : model;
-  const timerKey = `${connectionId}|${modelKey}`;
+function adjustPendingCounter(target, key, delta) {
+  if (!key) return;
+  target[key] = Math.max(0, (target[key] || 0) + delta);
+  if (target[key] === 0) delete target[key];
+}
 
-  if (!pendingRequests.byModel[modelKey]) pendingRequests.byModel[modelKey] = 0;
-  pendingRequests.byModel[modelKey] = Math.max(0, pendingRequests.byModel[modelKey] + (started ? 1 : -1));
-  if (pendingRequests.byModel[modelKey] === 0) delete pendingRequests.byModel[modelKey];
+function adjustLegacyPending(modelKey, connectionId, delta) {
+  adjustPendingCounter(pendingRequests.byModel, modelKey, delta);
+  if (!connectionId) return;
+  pendingRequests.byAccount[connectionId] ||= {};
+  adjustPendingCounter(pendingRequests.byAccount[connectionId], modelKey, delta);
+  if (Object.keys(pendingRequests.byAccount[connectionId]).length === 0) {
+    delete pendingRequests.byAccount[connectionId];
+  }
+}
 
-  if (connectionId) {
-    if (!pendingRequests.byAccount[connectionId]) pendingRequests.byAccount[connectionId] = {};
-    if (!pendingRequests.byAccount[connectionId][modelKey]) pendingRequests.byAccount[connectionId][modelKey] = 0;
-    pendingRequests.byAccount[connectionId][modelKey] = Math.max(0, pendingRequests.byAccount[connectionId][modelKey] + (started ? 1 : -1));
-    if (pendingRequests.byAccount[connectionId][modelKey] === 0) {
-      delete pendingRequests.byAccount[connectionId][modelKey];
-      if (Object.keys(pendingRequests.byAccount[connectionId]).length === 0) {
-        delete pendingRequests.byAccount[connectionId];
+function pendingRouteKey(model, provider, connectionId, attribution) {
+  const meta = normalizeUsageMeta(attribution || {});
+  return JSON.stringify([
+    connectionId || "",
+    provider || "",
+    model || "",
+    meta.requestedModel || "",
+    meta.comboName || "",
+  ]);
+}
+
+function collectActiveRequests(connectionMap) {
+  const routes = Object.values(pendingRequests.byRoute || {}).filter((route) => route?.count > 0);
+  const activeRequests = routes
+    .filter((route) => route.connectionId)
+    .map((route) => ({
+      model: route.model,
+      provider: route.provider || "unknown",
+      account: connectionMap[route.connectionId] || `Account ${route.connectionId.slice(0, 8)}...`,
+      count: route.count,
+      requestedModel: route.requestedModel || route.model,
+      comboName: route.comboName || null,
+    }));
+
+  // byAccount is retained for requests started before attribution-aware route
+  // tracking (and is also updated for every new route). Include only the
+  // residual legacy count so a rolling deploy cannot drop old requests or
+  // double-count requests represented in byRoute.
+  const routeCountsByAccountModel = new Map();
+  for (const route of routes) {
+    if (!route.connectionId) continue;
+    const modelKey = route.provider ? `${route.model} (${route.provider})` : route.model;
+    const key = `${route.connectionId}\u0000${modelKey}`;
+    routeCountsByAccountModel.set(key, (routeCountsByAccountModel.get(key) || 0) + route.count);
+  }
+
+  for (const [connectionId, models] of Object.entries(pendingRequests.byAccount)) {
+    for (const [modelKey, count] of Object.entries(models)) {
+      const residualCount = count - (routeCountsByAccountModel.get(`${connectionId}\u0000${modelKey}`) || 0);
+      if (residualCount > 0) {
+        const accountName = connectionMap[connectionId] || `Account ${connectionId.slice(0, 8)}...`;
+        const match = modelKey.match(/^(.*) \((.*)\)$/);
+        const model = match ? match[1] : modelKey;
+        activeRequests.push({
+          model,
+          provider: match ? match[2] : "unknown",
+          account: accountName,
+          count: residualCount,
+          requestedModel: model,
+          comboName: null,
+        });
       }
+    }
+  }
+  return activeRequests;
+}
+
+export function trackPendingRequest(model, provider, connectionId, started, error = false, requestAttribution = null) {
+  const modelKey = provider ? `${model} (${provider})` : model;
+  const meta = normalizeUsageMeta(requestAttribution || {});
+  const routeKey = pendingRouteKey(model, provider, connectionId, meta);
+  const timerKey = `route:${routeKey}`;
+
+  if (started) {
+    const route = pendingRequests.byRoute[routeKey] || {
+      model,
+      provider: provider || "unknown",
+      connectionId: connectionId || null,
+      requestedModel: meta.requestedModel || model,
+      comboName: meta.comboName || null,
+      count: 0,
+    };
+    route.count += 1;
+    pendingRequests.byRoute[routeKey] = route;
+    adjustLegacyPending(modelKey, connectionId, 1);
+  } else {
+    const route = pendingRequests.byRoute[routeKey];
+    if (route?.count > 0) {
+      route.count -= 1;
+      adjustLegacyPending(modelKey, connectionId, -1);
+      if (route.count === 0) delete pendingRequests.byRoute[routeKey];
+    } else {
+      // A completion callback can fire before dispatch or more than once. Do
+      // not let it decrement another combo that happens to share this leaf.
+      // Only touch legacy-only state left by a request that predates hot reload.
+      const hasTrackedSibling = Object.values(pendingRequests.byRoute).some((candidate) => (
+        candidate?.count > 0
+        && candidate.model === model
+        && candidate.provider === (provider || "unknown")
+        && candidate.connectionId === (connectionId || null)
+      ));
+      if (!hasTrackedSibling) adjustLegacyPending(modelKey, connectionId, -1);
     }
   }
 
@@ -173,15 +347,18 @@ export function trackPendingRequest(model, provider, connectionId, started, erro
     clearTimeout(pendingTimers[timerKey]);
     pendingTimers[timerKey] = setTimeout(() => {
       delete pendingTimers[timerKey];
-      if (pendingRequests.byModel[modelKey] > 0) pendingRequests.byModel[modelKey] = 0;
-      if (connectionId && pendingRequests.byAccount[connectionId]?.[modelKey] > 0) {
-        pendingRequests.byAccount[connectionId][modelKey] = 0;
+      const route = pendingRequests.byRoute[routeKey];
+      if (route?.count > 0) {
+        adjustLegacyPending(modelKey, connectionId, -route.count);
+        delete pendingRequests.byRoute[routeKey];
       }
       scheduleStatsEvent("pending");
     }, PENDING_TIMEOUT_MS);
   } else {
-    clearTimeout(pendingTimers[timerKey]);
-    delete pendingTimers[timerKey];
+    if (!pendingRequests.byRoute[routeKey]) {
+      clearTimeout(pendingTimers[timerKey]);
+      delete pendingTimers[timerKey];
+    }
   }
 
   if (!started && error && provider) {
@@ -194,22 +371,8 @@ export function trackPendingRequest(model, provider, connectionId, started, erro
 }
 
 export async function getActiveRequests() {
-  const activeRequests = [];
   const connectionMap = await getConnectionMapCached();
-
-  for (const [connectionId, models] of Object.entries(pendingRequests.byAccount)) {
-    for (const [modelKey, count] of Object.entries(models)) {
-      if (count > 0) {
-        const accountName = connectionMap[connectionId] || `Account ${connectionId.slice(0, 8)}...`;
-        const match = modelKey.match(/^(.*) \((.*)\)$/);
-        activeRequests.push({
-          model: match ? match[1] : modelKey,
-          provider: match ? match[2] : "unknown",
-          account: accountName, count,
-        });
-      }
-    }
-  }
+  const activeRequests = collectActiveRequests(connectionMap);
 
   await ensureRingInitialized();
   const seen = new Set();
@@ -217,17 +380,20 @@ export async function getActiveRequests() {
     .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
     .map((e) => {
       const t = e.tokens || {};
+      const meta = normalizeUsageMeta(e);
       return {
         timestamp: e.timestamp, model: e.model, provider: e.provider || "",
         promptTokens: t.prompt_tokens || t.input_tokens || 0,
         completionTokens: t.completion_tokens || t.output_tokens || 0,
         status: e.status || "ok",
+        requestedModel: meta.requestedModel || null,
+        comboName: meta.comboName || null,
       };
     })
     .filter((e) => {
       if (e.promptTokens === 0 && e.completionTokens === 0) return false;
       const minute = e.timestamp ? e.timestamp.slice(0, 16) : "";
-      const key = `${e.model}|${e.provider}|${e.promptTokens}|${e.completionTokens}|${minute}`;
+      const key = `${e.model}|${e.provider}|${e.requestedModel}|${e.comboName || ""}|${e.promptTokens}|${e.completionTokens}|${minute}`;
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
@@ -244,6 +410,11 @@ export async function saveRequestUsage(entry) {
 
     if (!entry.timestamp) entry.timestamp = new Date().toISOString();
     entry.cost = await calculateCost(entry.provider, entry.model, entry.tokens);
+    const usageMeta = normalizeUsageMeta(entry);
+    const usageMetaJson = stringifyJson(usageMeta);
+    entry.meta = usageMeta;
+    entry.requestedModel = usageMeta.requestedModel;
+    entry.comboName = usageMeta.comboName;
 
     const tokens = entry.tokens || {};
     const promptTokens = tokens.prompt_tokens || tokens.input_tokens || 0;
@@ -263,11 +434,12 @@ export async function saveRequestUsage(entry) {
            AND COALESCE(apiKey, '') = COALESCE(?, '')
            AND promptTokens = ?
            AND completionTokens = ?
+           AND COALESCE(meta, '{}') = ?
          ORDER BY id DESC LIMIT 1`,
         [
           entry.timestamp, entry.provider || null, entry.model || null,
           entry.connectionId || null, entry.apiKey || null,
-          promptTokens, completionTokens,
+          promptTokens, completionTokens, usageMetaJson,
         ]
       );
 
@@ -284,7 +456,7 @@ export async function saveRequestUsage(entry) {
           entry.timestamp, entry.provider || null, entry.model || null,
           entry.connectionId || null, entry.apiKey || null, entry.endpoint || null,
           promptTokens, completionTokens, entry.cost || 0, entry.status || "ok",
-          stringifyJson(tokens), stringifyJson({}),
+          stringifyJson(tokens), usageMetaJson,
         ]
       );
 
@@ -324,13 +496,18 @@ export async function getUsageHistory(filter = {}) {
   if (filter.endDate) { conds.push("timestamp <= ?"); params.push(new Date(filter.endDate).toISOString()); }
 
   const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
-  const rows = db.all(`SELECT timestamp, provider, model, connectionId, apiKey, endpoint, cost, status, tokens FROM usageHistory ${where} ORDER BY id ASC`, params);
+  const rows = db.all(`SELECT timestamp, provider, model, connectionId, apiKey, endpoint, cost, status, tokens, meta FROM usageHistory ${where} ORDER BY id ASC`, params);
 
-  return rows.map((r) => ({
-    timestamp: r.timestamp, provider: r.provider, model: r.model,
-    connectionId: r.connectionId, apiKeyMasked: maskApiKey(r.apiKey), endpoint: r.endpoint,
-    cost: r.cost, status: r.status, tokens: parseJson(r.tokens, {}),
-  }));
+  return rows.map((r) => {
+    const meta = normalizeUsageMeta({ meta: parseJson(r.meta, {}) });
+    return {
+      timestamp: r.timestamp, provider: r.provider, model: r.model,
+      connectionId: r.connectionId, apiKeyMasked: maskApiKey(r.apiKey), endpoint: r.endpoint,
+      cost: r.cost, status: r.status, tokens: parseJson(r.tokens, {}),
+      requestedModel: meta.requestedModel || null,
+      comboName: meta.comboName || null,
+    };
+  });
 }
 
 function loadDaysInRange(adapter, maxDays) {
@@ -369,23 +546,26 @@ export async function getUsageStats(period = "all") {
   for (const k of allApiKeys) apiKeyMap[k.key] = { name: k.name, id: k.id, createdAt: k.createdAt };
 
   // recentRequests from live history (last 100 entries enough for 20 deduped)
-  const recentRows = db.all(`SELECT timestamp, provider, model, tokens, status FROM usageHistory ORDER BY id DESC LIMIT 100`);
+  const recentRows = db.all(`SELECT timestamp, provider, model, tokens, status, meta FROM usageHistory ORDER BY id DESC LIMIT 100`);
   const seen = new Set();
   const recentRequests = recentRows
     .map((r) => {
       const t = parseJson(r.tokens, {}) || {};
+      const meta = normalizeUsageMeta({ meta: parseJson(r.meta, {}) });
       return {
         timestamp: r.timestamp, model: r.model, provider: r.provider || "",
         promptTokens: t.prompt_tokens || t.input_tokens || 0,
         completionTokens: t.completion_tokens || t.output_tokens || 0,
         cachedTokens: t.cached_tokens || t.cache_read_input_tokens || 0,
         status: r.status || "ok",
+        requestedModel: meta.requestedModel || null,
+        comboName: meta.comboName || null,
       };
     })
     .filter((e) => {
       if (e.promptTokens === 0 && e.completionTokens === 0) return false;
       const minute = e.timestamp ? e.timestamp.slice(0, 16) : "";
-      const key = `${e.model}|${e.provider}|${e.promptTokens}|${e.completionTokens}|${minute}`;
+      const key = `${e.model}|${e.provider}|${e.requestedModel || ""}|${e.comboName || ""}|${e.promptTokens}|${e.completionTokens}|${minute}`;
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
@@ -395,7 +575,7 @@ export async function getUsageStats(period = "all") {
   const stats = {
     totalRequests: 0,
     totalPromptTokens: 0, totalCompletionTokens: 0, totalCachedTokens: 0, totalCost: 0,
-    byProvider: {}, byModel: {}, byAccount: {}, byApiKey: {}, byEndpoint: {},
+    byProvider: {}, byModel: {}, byAccount: {}, byApiKey: {}, byEndpoint: {}, byCombo: {},
     last10Minutes: [],
     pending: pendingRequests,
     activeRequests: [],
@@ -403,20 +583,7 @@ export async function getUsageStats(period = "all") {
     errorProvider: (Date.now() - lastErrorProvider.ts < 10000) ? lastErrorProvider.provider : "",
   };
 
-  // Active requests
-  for (const [connectionId, models] of Object.entries(pendingRequests.byAccount)) {
-    for (const [modelKey, count] of Object.entries(models)) {
-      if (count > 0) {
-        const accountName = connectionMap[connectionId] || `Account ${connectionId.slice(0, 8)}...`;
-        const match = modelKey.match(/^(.*) \((.*)\)$/);
-        stats.activeRequests.push({
-          model: match ? match[1] : modelKey,
-          provider: match ? match[2] : "unknown",
-          account: accountName, count,
-        });
-      }
-    }
-  }
+  stats.activeRequests = collectActiveRequests(connectionMap);
 
   // last10Minutes — query 10min window
   const now = new Date();
@@ -535,6 +702,10 @@ export async function getUsageStats(period = "all") {
         stats.byEndpoint[epKey].cost += ep.cost || 0;
         if (dateKey > (stats.byEndpoint[epKey].lastUsed || "")) stats.byEndpoint[epKey].lastUsed = dateKey;
       }
+
+      for (const [comboName, combo] of Object.entries(day.byCombo || {})) {
+        mergeComboAggregate(stats.byCombo, comboName, combo, dateKey);
+      }
     }
 
     // Overlay precise lastUsed timestamps from history
@@ -574,7 +745,7 @@ export async function getUsageStats(period = "all") {
       cutoff = new Date(Date.now() - PERIOD_MS["24h"]).toISOString();
     }
     const filtered = db.all(
-      `SELECT timestamp, provider, model, connectionId, apiKey, endpoint, promptTokens, completionTokens, cost, tokens FROM usageHistory WHERE timestamp >= ?`,
+      `SELECT timestamp, provider, model, connectionId, apiKey, endpoint, promptTokens, completionTokens, cost, tokens, meta FROM usageHistory WHERE timestamp >= ?`,
       [cutoff]
     );
 
@@ -587,6 +758,7 @@ export async function getUsageStats(period = "all") {
       const cachedTokens = tokens.cached_tokens || tokens.cache_read_input_tokens || 0;
       const entryCost = r.cost || 0;
       const providerDisplayName = providerNodeNameMap[r.provider] || r.provider;
+      const meta = normalizeUsageMeta({ meta: parseJson(r.meta, {}) });
 
       stats.totalPromptTokens += promptTokens;
       stats.totalCompletionTokens += completionTokens;
@@ -653,6 +825,14 @@ export async function getUsageStats(period = "all") {
       const epe = stats.byEndpoint[epKey];
       epe.requests++; epe.promptTokens += promptTokens; epe.completionTokens += completionTokens; epe.cachedTokens += cachedTokens; epe.cost += entryCost;
       if (new Date(r.timestamp) > new Date(epe.lastUsed)) epe.lastUsed = r.timestamp;
+
+      addComboEntry(stats.byCombo, { ...r, ...meta }, {
+        promptTokens,
+        completionTokens,
+        cachedTokens,
+        cost: entryCost,
+        requests: 1,
+      });
     }
   }
 

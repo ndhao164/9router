@@ -17,6 +17,7 @@ import { getProviderIconSrc, markProviderIconMissing } from "@/shared/utils/prov
 // Force-stop FE animation if a provider stays active longer than this
 const FE_ACTIVE_TIMEOUT_MS = 60000;
 const FE_ACTIVE_TICK_MS = 1000;
+const FIT_OPTIONS = { padding: 0.2, duration: 200 };
 
 // Kame + electric particles along active edges
 const KAME_PARTICLE_COUNT = 6;
@@ -91,6 +92,51 @@ function ProviderNode({ data }) {
 }
 
 ProviderNode.propTypes = {
+  data: PropTypes.object.isRequired,
+};
+
+// Combo nodes sit between 9Router and their member providers. Their different
+// silhouette/color keeps routing rules visually separate from provider nodes.
+function ComboNode({ data }) {
+  const { label, modelCount = 0, providerCount = 0, active, last } = data;
+  const color = active ? "#a78bfa" : last ? "#f59e0b" : "#8b5cf6";
+
+  return (
+    <div
+      className="relative flex min-w-[165px] max-w-[190px] items-center gap-2.5 rounded-xl border-2 bg-bg px-3.5 py-2.5 transition-all duration-300"
+      style={{
+        borderColor: active || last ? color : "#8b5cf680",
+        boxShadow: active ? `0 0 18px ${color}55` : "none",
+      }}
+      title={`${label}: ${modelCount} model${modelCount === 1 ? "" : "s"}, ${providerCount} provider${providerCount === 1 ? "" : "s"}`}
+    >
+      {Object.entries({ Top: Position.Top, Bottom: Position.Bottom, Left: Position.Left, Right: Position.Right }).flatMap(([side, position]) => [
+        <Handle key={`target-${side}`} type="target" position={position} id={`target-${side.toLowerCase()}`} className="!h-0 !w-0 !border-0 !bg-transparent" />,
+        <Handle key={`source-${side}`} type="source" position={position} id={`source-${side.toLowerCase()}`} className="!h-0 !w-0 !border-0 !bg-transparent" />,
+      ])}
+
+      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-violet-500/10 text-violet-500">
+        <span className="material-symbols-outlined text-[19px]">layers</span>
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-sm font-semibold" style={{ color: active ? color : "var(--color-text)" }}>
+          {label}
+        </div>
+        <div className="text-[9px] font-semibold uppercase tracking-[0.14em] text-violet-500/80">
+          Combo · {modelCount} model{modelCount === 1 ? "" : "s"}
+        </div>
+      </div>
+      {active && (
+        <span className="relative flex h-2 w-2 shrink-0">
+          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-violet-400 opacity-75" />
+          <span className="relative inline-flex h-2 w-2 rounded-full bg-violet-400" />
+        </span>
+      )}
+    </div>
+  );
+}
+
+ComboNode.propTypes = {
   data: PropTypes.object.isRequired,
 };
 
@@ -256,95 +302,209 @@ TopologyEdge.propTypes = {
   data: PropTypes.object,
 };
 
-const nodeTypes = { provider: ProviderNode, router: RouterNode };
+const nodeTypes = { provider: ProviderNode, combo: ComboNode, router: RouterNode };
 const edgeTypes = { topology: TopologyEdge };
 
-// Place N nodes evenly along an ellipse around the router center.
-function buildLayout(providers, activeSet, lastSet, errorSet) {
-  const nodeW = 180;
-  const nodeH = 30;
-  const routerW = 120;
-  const routerH = 44;
-  const nodeGap = 24;
+function routeHandles(sourceCenter, targetCenter, sourcePrefix = "", targetPrefix = "") {
+  const dx = targetCenter.x - sourceCenter.x;
+  const dy = targetCenter.y - sourceCenter.y;
+  let sourceSide;
+  let targetSide;
 
-  const count = providers.length;
-
-  // Compute rx so arc spacing between nodes >= nodeW + nodeGap
-  const minRx = ((nodeW + nodeGap) * count) / (2 * Math.PI);
-  const rx = Math.max(320, minRx);
-  const ry = Math.max(200, rx * 0.55); // ellipse ratio ~0.55
-  if (count === 0) {
-    return {
-      nodes: [{ id: "router", type: "router", position: { x: 0, y: 0 }, data: { activeCount: 0 }, draggable: false }],
-      edges: [],
-    };
+  if (Math.abs(dx) >= Math.abs(dy)) {
+    sourceSide = dx >= 0 ? "right" : "left";
+    targetSide = dx >= 0 ? "left" : "right";
+  } else {
+    sourceSide = dy >= 0 ? "bottom" : "top";
+    targetSide = dy >= 0 ? "top" : "bottom";
   }
 
+  return {
+    sourceHandle: `${sourcePrefix}${sourceSide}`,
+    targetHandle: `${targetPrefix}${targetSide}`,
+  };
+}
+
+function edgeStyle(active, last, error, idleStroke = "var(--color-border)") {
+  if (error) return { stroke: "#ef4444", strokeWidth: 2.5, opacity: 0.9 };
+  if (active) return { stroke: "#22d3ee", strokeWidth: 3.5, opacity: 1 };
+  if (last) return { stroke: "#f59e0b", strokeWidth: 2, opacity: 0.75 };
+  return { stroke: idleStroke, strokeWidth: 1.2, opacity: idleStroke === "var(--color-border)" ? 0.3 : 0.32 };
+}
+
+function normalizeAngle(angle) {
+  const full = Math.PI * 2;
+  return ((angle % full) + full) % full;
+}
+
+// Providers occupy the outer ellipse; combos occupy an inner ellipse. This
+// keeps the route legible as Router → Combo → Provider without losing direct
+// Router → Provider paths for providers outside every combo.
+function buildLayout(providers, combos, routeState) {
+  const providerW = 180;
+  const providerH = 54;
+  const comboW = 180;
+  const comboH = 58;
+  const routerW = 130;
+  const routerH = 48;
+  const nodeGap = 28;
+  const providerCount = providers.length;
+  const comboCount = combos.length;
+
+  const comboMinRx = ((comboW + nodeGap) * comboCount) / (2 * Math.PI);
+  const innerRx = Math.max(190, comboMinRx);
+  const innerRy = Math.max(112, innerRx * 0.58);
+  const providerMinRx = ((providerW + nodeGap) * providerCount) / (2 * Math.PI);
+  const outerRx = Math.max(comboCount ? innerRx + 230 : 320, providerMinRx);
+  const outerRy = Math.max(comboCount ? innerRy + 145 : 200, outerRx * 0.55);
+  const routerCenter = { x: 0, y: 0 };
   const nodes = [];
   const edges = [];
+  const providerCenters = new Map();
+  const providerAngles = new Map();
 
   nodes.push({
     id: "router",
     type: "router",
     position: { x: -routerW / 2, y: -routerH / 2 },
-    data: { activeCount: activeSet.size },
+    data: { activeCount: routeState.activeCombos.size + routeState.directActiveProviders.size },
     draggable: false,
   });
 
-  const edgeStyle = (active, last, error) => {
-    if (error) return { stroke: "#ef4444", strokeWidth: 2.5, opacity: 0.9 };
-    if (active) return { stroke: "#22d3ee", strokeWidth: 3.5, opacity: 1 };
-    if (last) return { stroke: "#f59e0b", strokeWidth: 2, opacity: 0.7 };
-    return { stroke: "var(--color-border)", strokeWidth: 1, opacity: 0.3 };
-  };
+  providers.forEach((provider, index) => {
+    const angle = -Math.PI / 2 + (2 * Math.PI * index) / Math.max(providerCount, 1);
+    const center = { x: outerRx * Math.cos(angle), y: outerRy * Math.sin(angle) };
+    const providerKey = typeof provider.provider === "string" ? provider.provider.toLowerCase() : "";
+    const config = getProviderConfig(provider.provider);
+    const active = routeState.activeProviders.has(providerKey);
 
-  providers.forEach((p, i) => {
-    const config = getProviderConfig(p.provider);
-    const active = activeSet.has(p.provider?.toLowerCase());
-    const last = !active && lastSet.has(p.provider?.toLowerCase());
-    const error = !active && errorSet.has(p.provider?.toLowerCase());
-    const nodeId = `provider-${p.provider}`;
-    const data = {
-      label: (config.name !== p.provider ? config.name : null) || p.nodeName || p.name || p.provider,
-      color: config.color || "#6b7280",
-      imageUrl: getProviderImageUrl(p.provider),
-      textIcon: config.textIcon || (p.provider || "?").slice(0, 2).toUpperCase(),
-      active,
-    };
-
-    // Distribute evenly starting from top (−π/2), clockwise
-    const angle = -Math.PI / 2 + (2 * Math.PI * i) / count;
-    const cx = rx * Math.cos(angle);
-    const cy = ry * Math.sin(angle);
-
-    // Pick router handle closest to the node direction
-    let sourceHandle, targetHandle;
-    if (Math.abs(angle + Math.PI / 2) < Math.PI / 4 || Math.abs(angle - 3 * Math.PI / 2) < Math.PI / 4) {
-      sourceHandle = "top"; targetHandle = "bottom";
-    } else if (Math.abs(angle - Math.PI / 2) < Math.PI / 4) {
-      sourceHandle = "bottom"; targetHandle = "top";
-    } else if (cx > 0) {
-      sourceHandle = "right"; targetHandle = "left";
-    } else {
-      sourceHandle = "left"; targetHandle = "right";
-    }
-
+    providerCenters.set(provider.provider, center);
+    providerAngles.set(provider.provider, angle);
     nodes.push({
-      id: nodeId,
+      id: `provider-${provider.provider}`,
       type: "provider",
-      position: { x: cx - nodeW / 2, y: cy - nodeH / 2 },
-      data,
+      position: { x: center.x - providerW / 2, y: center.y - providerH / 2 },
+      data: {
+        label: (config.name !== provider.provider ? config.name : null) || provider.nodeName || provider.name || provider.provider,
+        color: config.color || "#6b7280",
+        imageUrl: getProviderImageUrl(provider.provider),
+        textIcon: config.textIcon || (provider.provider || "?").slice(0, 2).toUpperCase(),
+        active,
+      },
       draggable: false,
     });
+  });
 
+  const validProviderIds = new Set(providerCenters.keys());
+  const representedProviderIds = new Set();
+  const comboEntries = combos.map((combo) => {
+    const providerIds = [...new Set(
+      (Array.isArray(combo.providerIds) ? combo.providerIds : []).filter((id) => validProviderIds.has(id))
+    )];
+    providerIds.forEach((id) => representedProviderIds.add(id));
+
+    const vectors = providerIds
+      .map((id) => providerAngles.get(id))
+      .filter((angle) => typeof angle === "number")
+      .map((angle) => ({ x: Math.cos(angle), y: Math.sin(angle) }));
+    const vector = vectors.reduce((sum, item) => ({ x: sum.x + item.x, y: sum.y + item.y }), { x: 0, y: 0 });
+    const magnitude = Math.hypot(vector.x, vector.y);
+    const preferredAngle = magnitude > 0.1 ? Math.atan2(vector.y, vector.x) : -Math.PI / 2;
+    return { combo, providerIds, preferredAngle };
+  });
+
+  // Preserve the circular order of each combo's providers to reduce crossings.
+  comboEntries.sort((a, b) => {
+    // Layout slots also begin at the top (-π/2), so rotate before normalizing.
+    const angleDiff = normalizeAngle(a.preferredAngle + Math.PI / 2) - normalizeAngle(b.preferredAngle + Math.PI / 2);
+    return angleDiff || String(a.combo.name).localeCompare(String(b.combo.name));
+  });
+
+  const comboCenters = new Map();
+  comboEntries.forEach((entry, index) => {
+    const angle = comboCount === 1
+      ? entry.preferredAngle
+      : -Math.PI / 2 + (2 * Math.PI * index) / Math.max(comboCount, 1);
+    const center = { x: innerRx * Math.cos(angle), y: innerRy * Math.sin(angle) };
+    const active = routeState.activeCombos.has(entry.combo.name);
+    const last = !active && routeState.lastCombo === entry.combo.name;
+    const nodeId = `combo-${entry.combo.name}`;
+    const handles = routeHandles(routerCenter, center, "", "target-");
+
+    comboCenters.set(entry.combo.name, center);
+    nodes.push({
+      id: nodeId,
+      type: "combo",
+      position: { x: center.x - comboW / 2, y: center.y - comboH / 2 },
+      data: {
+        label: entry.combo.name,
+        modelCount: Array.isArray(entry.combo.models) ? entry.combo.models.length : 0,
+        providerCount: entry.providerIds.length,
+        active,
+        last,
+      },
+      draggable: false,
+    });
     edges.push({
-      id: `e-${nodeId}`,
+      id: `e-router-combo-${entry.combo.name}`,
       type: "topology",
       source: "router",
-      sourceHandle,
+      sourceHandle: handles.sourceHandle,
       target: nodeId,
-      targetHandle,
-      // Built-in animated uses stroke-dasharray (CPU-heavy); use particle beam instead
+      targetHandle: handles.targetHandle,
+      animated: false,
+      data: { active },
+      style: edgeStyle(active, last, false, "#8b5cf6"),
+    });
+  });
+
+  comboEntries.forEach((entry) => {
+    const comboCenter = comboCenters.get(entry.combo.name);
+    for (const providerId of entry.providerIds) {
+      const providerCenter = providerCenters.get(providerId);
+      if (!comboCenter || !providerCenter) continue;
+      const providerKey = typeof providerId === "string" ? providerId.toLowerCase() : "";
+      const pairKey = `${entry.combo.name}\u0000${providerKey}`;
+      const active = routeState.activeComboProviders.has(pairKey);
+      const last = !active && routeState.lastCombo === entry.combo.name && routeState.lastProvider === providerKey;
+      const error = !active && routeState.errorProviders.has(providerKey) && routeState.lastCombo === entry.combo.name;
+      const handles = routeHandles(comboCenter, providerCenter, "source-", "");
+
+      edges.push({
+        id: `e-combo-${entry.combo.name}-provider-${providerId}`,
+        type: "topology",
+        source: `combo-${entry.combo.name}`,
+        sourceHandle: handles.sourceHandle,
+        target: `provider-${providerId}`,
+        targetHandle: handles.targetHandle,
+        animated: false,
+        data: { active },
+        style: edgeStyle(active, last, error, "#8b5cf6"),
+      });
+    }
+  });
+
+  // A provider represented by a combo normally uses only the two-hop path.
+  // Temporarily retain its direct edge when live/recent direct traffic proves
+  // that Router → Provider is also being used.
+  providers.forEach((provider) => {
+    const providerId = provider.provider;
+    const providerKey = typeof providerId === "string" ? providerId.toLowerCase() : "";
+    const active = routeState.directActiveProviders.has(providerKey);
+    const last = !active && !routeState.lastCombo && routeState.lastProvider === providerKey;
+    const error = !active && !routeState.lastCombo && routeState.errorProviders.has(providerKey);
+    const needsDirectEdge = !representedProviderIds.has(providerId) || routeState.directActiveProviders.has(providerKey) || last || error;
+    if (!needsDirectEdge) return;
+
+    const providerCenter = providerCenters.get(providerId);
+    const handles = routeHandles(routerCenter, providerCenter);
+    edges.push({
+      id: `e-router-provider-${providerId}`,
+      type: "topology",
+      source: "router",
+      sourceHandle: handles.sourceHandle,
+      target: `provider-${providerId}`,
+      targetHandle: handles.targetHandle,
       animated: false,
       data: { active },
       style: edgeStyle(active, last, error),
@@ -354,67 +514,166 @@ function buildLayout(providers, activeSet, lastSet, errorSet) {
   return { nodes, edges };
 }
 
-export default function ProviderTopology({ providers = [], activeRequests = [], lastProvider = "", errorProvider = "" }) {
-  // Serialize to stable string keys so useMemo only re-runs when values actually change
-  const activeKey = useMemo(
-    () => activeRequests.map((r) => r.provider?.toLowerCase()).filter(Boolean).sort().join(","),
-    [activeRequests]
-  );
-  const lastKey = lastProvider?.toLowerCase() || "";
-  const errorKey = errorProvider?.toLowerCase() || "";
+function getRequestCombo(request, comboNameSet) {
+  const comboName = typeof request?.comboName === "string" ? request.comboName.trim() : "";
+  if (comboName && comboNameSet.has(comboName)) return comboName;
+  const requestedModel = typeof request?.requestedModel === "string" ? request.requestedModel.trim() : "";
+  return requestedModel && comboNameSet.has(requestedModel) ? requestedModel : "";
+}
 
-  const rawActiveSet = useMemo(() => new Set(activeKey ? activeKey.split(",") : []), [activeKey]);
-  const lastSet = useMemo(() => new Set(lastKey ? [lastKey] : []), [lastKey]);
-  const errorSet = useMemo(() => new Set(errorKey ? [errorKey] : []), [errorKey]);
+function activityKey(type, ...parts) {
+  return `${type}:${parts.join("\u0000")}`;
+}
 
-  // Track firstSeen per active provider; drop provider if running too long (BE stuck)
+// Activity keys include a request-count suffix so a newly started request on a
+// route that was previously expired gets a fresh animation window. Match by
+// the stable route prefix when deriving graph state.
+function hasActivity(activitySet, type, ...parts) {
+  const base = activityKey(type, ...parts);
+  for (const key of activitySet) {
+    if (key === base || key.startsWith(`${base}\u0000`)) return true;
+  }
+  return false;
+}
+
+export default function ProviderTopology({
+  providers = [],
+  combos = [],
+  activeRequests = [],
+  lastProvider = "",
+  lastCombo = "",
+  errorProvider = "",
+}) {
+  const comboNameSet = useMemo(() => new Set(combos.map((combo) => combo.name).filter(Boolean)), [combos]);
+
+  // Serialize route-level activity so unchanged SSE snapshots do not rebuild the
+  // graph. Combo metadata is optional for compatibility with older snapshots.
+  const rawActivityKey = useMemo(() => {
+    const counts = new Map();
+    for (const request of activeRequests) {
+      const provider = typeof request?.provider === "string" ? request.provider.toLowerCase() : "";
+      const combo = getRequestCombo(request, comboNameSet);
+      const countValue = Number(request?.count);
+      const count = Number.isFinite(countValue) && countValue > 0 ? countValue : 1;
+      const addActivity = (type, ...parts) => {
+        const key = activityKey(type, ...parts);
+        counts.set(key, (counts.get(key) || 0) + count);
+      };
+      if (provider) addActivity("provider", provider);
+      if (combo) {
+        addActivity("combo", combo);
+        if (provider) addActivity("combo-provider", combo, provider);
+      } else if (provider) {
+        addActivity("direct-provider", provider);
+      }
+    }
+    return [...counts.entries()]
+      .map(([key, count]) => `${key}\u0000${count}`)
+      .sort()
+      .join("|");
+  }, [activeRequests, comboNameSet]);
+  const rawActivitySet = useMemo(() => new Set(rawActivityKey ? rawActivityKey.split("|") : []), [rawActivityKey]);
+
+  // Track firstSeen per active route; drop animations if a BE request gets stuck.
   const firstSeenRef = useRef({});
-  const [tick, setTick] = useState(0);
+  const [expiredActivityKey, setExpiredActivityKey] = useState("");
 
   useEffect(() => {
     const seen = firstSeenRef.current;
     const now = Date.now();
-    for (const p of rawActiveSet) {
-      if (!seen[p]) seen[p] = now;
+    for (const key of rawActivitySet) {
+      if (!seen[key]) seen[key] = now;
     }
-    for (const p of Object.keys(seen)) {
-      if (!rawActiveSet.has(p)) delete seen[p];
+    for (const key of Object.keys(seen)) {
+      if (!rawActivitySet.has(key)) delete seen[key];
     }
-  }, [rawActiveSet]);
 
-  useEffect(() => {
-    if (rawActiveSet.size === 0) return;
-    const id = setInterval(() => setTick((t) => t + 1), FE_ACTIVE_TICK_MS);
-    return () => clearInterval(id);
-  }, [rawActiveSet]);
+    const refreshExpired = () => {
+      const currentTime = Date.now();
+      const expired = [...rawActivitySet]
+        .filter((key) => currentTime - (seen[key] || currentTime) >= FE_ACTIVE_TIMEOUT_MS)
+        .sort()
+        .join("|");
+      setExpiredActivityKey((previous) => previous === expired ? previous : expired);
+    };
+    // Run asynchronously so a reappearing route immediately loses stale expiry.
+    const initialId = setTimeout(refreshExpired, 0);
+    const intervalId = rawActivitySet.size > 0
+      ? setInterval(refreshExpired, FE_ACTIVE_TICK_MS)
+      : null;
+    return () => {
+      clearTimeout(initialId);
+      if (intervalId) clearInterval(intervalId);
+    };
+  }, [rawActivitySet]);
 
-  const activeSet = useMemo(() => {
-    const now = Date.now();
-    const filtered = new Set();
-    for (const p of rawActiveSet) {
-      const ts = firstSeenRef.current[p];
-      if (!ts || now - ts < FE_ACTIVE_TIMEOUT_MS) filtered.add(p);
-    }
-    return filtered;
-  }, [rawActiveSet, tick]);
-
-  const { nodes, edges } = useMemo(
-    () => buildLayout(providers, activeSet, lastSet, errorSet),
-    [providers, activeSet, lastSet, errorSet]
+  const expiredActivitySet = useMemo(
+    () => new Set(expiredActivityKey ? expiredActivityKey.split("|") : []),
+    [expiredActivityKey]
+  );
+  const activeActivitySet = useMemo(
+    () => new Set([...rawActivitySet].filter((key) => !expiredActivitySet.has(key))),
+    [rawActivitySet, expiredActivitySet]
   );
 
-  // Stable key — only remount when provider list changes
-  const providersKey = useMemo(
-    () => providers.map((p) => p.provider).sort().join(","),
-    [providers]
+  const routeState = useMemo(() => {
+    const activeProviders = new Set();
+    const activeCombos = new Set();
+    const activeComboProviders = new Set();
+    const directActiveProviders = new Set();
+
+    for (const provider of providers) {
+      const providerKey = typeof provider.provider === "string" ? provider.provider.toLowerCase() : "";
+      if (providerKey && hasActivity(activeActivitySet, "provider", providerKey)) {
+        activeProviders.add(providerKey);
+      }
+      if (providerKey && hasActivity(activeActivitySet, "direct-provider", providerKey)) {
+        directActiveProviders.add(providerKey);
+      }
+    }
+    for (const combo of combos) {
+      if (hasActivity(activeActivitySet, "combo", combo.name)) activeCombos.add(combo.name);
+      for (const providerId of (Array.isArray(combo.providerIds) ? combo.providerIds : [])) {
+        const providerKey = typeof providerId === "string" ? providerId.toLowerCase() : "";
+        if (providerKey && hasActivity(activeActivitySet, "combo-provider", combo.name, providerKey)) {
+          activeComboProviders.add(`${combo.name}\u0000${providerKey}`);
+        }
+      }
+    }
+
+    return {
+      activeProviders,
+      activeCombos,
+      activeComboProviders,
+      directActiveProviders,
+      lastProvider: typeof lastProvider === "string" ? lastProvider.toLowerCase() : "",
+      lastCombo: comboNameSet.has(lastCombo) ? lastCombo : "",
+      errorProviders: new Set(typeof errorProvider === "string" && errorProvider ? [errorProvider.toLowerCase()] : []),
+    };
+  }, [providers, combos, activeActivitySet, lastProvider, lastCombo, errorProvider, comboNameSet]);
+
+  const { nodes, edges } = useMemo(
+    () => buildLayout(providers, combos, routeState),
+    [providers, combos, routeState]
+  );
+
+  // Stable key — only remount when the topology catalog itself changes.
+  const topologyKey = useMemo(
+    () => [
+      providers.map((provider) => provider.provider).sort().join(","),
+      combos
+        .map((combo) => `${combo.name}:${(combo.providerIds || []).slice().sort().join("+")}`)
+        .sort()
+        .join(","),
+    ].join("|"),
+    [providers, combos]
   );
 
   const rfInstance = useRef(null);
   const containerRef = useRef(null);
-  const fitOpts = { padding: 0.2, duration: 200 };
   const onInit = useCallback((instance) => {
     rfInstance.current = instance;
-    setTimeout(() => instance.fitView(fitOpts), 50);
+    setTimeout(() => instance.fitView(FIT_OPTIONS), 50);
   }, []);
 
   // Re-fit on container resize
@@ -422,7 +681,7 @@ export default function ProviderTopology({ providers = [], activeRequests = [], 
     const el = containerRef.current;
     if (!el) return;
     const ro = new ResizeObserver(() => {
-      if (rfInstance.current) rfInstance.current.fitView(fitOpts);
+      if (rfInstance.current) rfInstance.current.fitView(FIT_OPTIONS);
     });
     ro.observe(el);
     return () => ro.disconnect();
@@ -431,26 +690,26 @@ export default function ProviderTopology({ providers = [], activeRequests = [], 
   // Re-fit when node count/layout changes
   useEffect(() => {
     if (rfInstance.current) {
-      const id = setTimeout(() => rfInstance.current.fitView(fitOpts), 50);
+      const id = setTimeout(() => rfInstance.current.fitView(FIT_OPTIONS), 50);
       return () => clearTimeout(id);
     }
   }, [nodes.length]);
 
   return (
     <div ref={containerRef} className="h-[320px] w-full min-w-0 rounded-lg border border-border bg-bg-subtle/30 sm:h-[480px]">
-      {providers.length === 0 ? (
+      {providers.length === 0 && combos.length === 0 ? (
         <div className="h-full flex items-center justify-center text-text-muted text-sm">
-          No providers connected
+          No providers or combos configured
         </div>
       ) : (
         <ReactFlow
-          key={providersKey}
+          key={topologyKey}
           nodes={nodes}
           edges={edges}
           nodeTypes={nodeTypes}
           edgeTypes={edgeTypes}
           fitView
-          fitViewOptions={fitOpts}
+          fitViewOptions={FIT_OPTIONS}
           minZoom={0.1}
           maxZoom={2}
           onInit={onInit}
@@ -477,11 +736,20 @@ ProviderTopology.propTypes = {
     provider: PropTypes.string,
     name: PropTypes.string,
   })),
+  combos: PropTypes.arrayOf(PropTypes.shape({
+    id: PropTypes.string,
+    name: PropTypes.string.isRequired,
+    models: PropTypes.arrayOf(PropTypes.string),
+    providerIds: PropTypes.arrayOf(PropTypes.string),
+  })),
   activeRequests: PropTypes.arrayOf(PropTypes.shape({
     provider: PropTypes.string,
     model: PropTypes.string,
     account: PropTypes.string,
+    comboName: PropTypes.string,
+    requestedModel: PropTypes.string,
   })),
   lastProvider: PropTypes.string,
+  lastCombo: PropTypes.string,
   errorProvider: PropTypes.string,
 };

@@ -22,6 +22,10 @@ function buildProviderEntry(r) {
     ...display,
     id: r.id,
     alias: r.uiAlias || r.alias,
+    // Keep every routing alias available to UI consumers that need to resolve
+    // provider/model references (the primary alias alone is not sufficient for
+    // providers such as Antigravity with multiple accepted prefixes).
+    ...(r.aliases?.length ? { aliases: r.aliases } : {}),
     ...(r.hidden ? { hidden: true } : {}),
     ...mediaFields,
     ...(r.priority !== undefined ? { priority: r.priority } : {}),

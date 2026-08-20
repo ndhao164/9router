@@ -19,6 +19,107 @@ import dynamic from "next/dynamic";
 const ProviderTopology = dynamic(() => import("@/app/(dashboard)/dashboard/usage/components/ProviderTopology"), { ssr: false });
 import UsageChart from "@/app/(dashboard)/dashboard/usage/components/UsageChart";
 
+function normalizeRouteKey(value) {
+  return typeof value === "string" ? value.trim().toLowerCase() : "";
+}
+
+// Resolve each combo's model references back to the connected provider IDs used
+// by usage analytics. Model aliases and nested combos are followed defensively;
+// cycles or stale model references simply produce no provider edge.
+function resolveComboProviders(rawCombos, providerList, modelAliases) {
+  const combos = Array.isArray(rawCombos) ? rawCombos : [];
+  const aliases = modelAliases && typeof modelAliases === "object" ? modelAliases : {};
+  const providerByRouteKey = new Map();
+
+  // Exact provider IDs always win over aliases/prefixes.
+  for (const provider of providerList) {
+    const providerId = provider?.provider;
+    if (providerId) providerByRouteKey.set(normalizeRouteKey(providerId), providerId);
+  }
+
+  // Registry aliases are reserved by runtime routing and therefore take
+  // precedence over user-defined compatible-provider prefixes.
+  for (const provider of providerList) {
+    const providerId = provider?.provider;
+    if (!providerId) continue;
+    const routeKeys = [AI_PROVIDERS[providerId]?.alias, ...(AI_PROVIDERS[providerId]?.aliases || [])];
+    for (const routeKey of routeKeys) {
+      const normalized = normalizeRouteKey(routeKey);
+      if (normalized && !providerByRouteKey.has(normalized)) {
+        providerByRouteKey.set(normalized, providerId);
+      }
+    }
+  }
+  for (const provider of providerList) {
+    const providerId = provider?.provider;
+    if (!providerId) continue;
+    for (const routeKey of [provider?.providerPrefix, provider?.providerSpecificData?.prefix]) {
+      const normalized = normalizeRouteKey(routeKey);
+      if (normalized && !providerByRouteKey.has(normalized)) {
+        providerByRouteKey.set(normalized, providerId);
+      }
+    }
+  }
+
+  const comboByName = new Map(
+    combos
+      .filter((combo) => typeof combo?.name === "string" && combo.name.trim())
+      .map((combo) => [combo.name, combo])
+  );
+
+  const resolveReference = (reference, seenReferences, seenCombos) => {
+    if (typeof reference !== "string") return new Set();
+    const trimmed = reference.trim();
+    if (!trimmed || seenReferences.has(trimmed)) return new Set();
+
+    const nextSeenReferences = new Set(seenReferences);
+    nextSeenReferences.add(trimmed);
+
+    // Runtime routing gives combo names precedence over model aliases, so mirror
+    // that behavior here. This also makes nested combos visible in the topology.
+    const nestedCombo = comboByName.get(trimmed);
+    if (nestedCombo && !seenCombos.has(trimmed)) {
+      const nextSeenCombos = new Set(seenCombos);
+      nextSeenCombos.add(trimmed);
+      const nestedProviders = new Set();
+      for (const model of (Array.isArray(nestedCombo.models) ? nestedCombo.models : [])) {
+        for (const providerId of resolveReference(model, nextSeenReferences, nextSeenCombos)) {
+          nestedProviders.add(providerId);
+        }
+      }
+      return nestedProviders;
+    }
+
+    const aliasTarget = aliases[trimmed];
+    if (typeof aliasTarget === "string" && aliasTarget.trim() && aliasTarget.trim() !== trimmed) {
+      return resolveReference(aliasTarget, nextSeenReferences, seenCombos);
+    }
+
+    const slashIndex = trimmed.indexOf("/");
+    const routeKey = slashIndex > 0 ? trimmed.slice(0, slashIndex) : trimmed;
+    const providerId = providerByRouteKey.get(normalizeRouteKey(routeKey));
+    return providerId ? new Set([providerId]) : new Set();
+  };
+
+  return combos.map((combo) => {
+    const providerIds = new Set();
+    const seenCombos = new Set(combo?.name ? [combo.name] : []);
+    for (const model of (Array.isArray(combo?.models) ? combo.models : [])) {
+      for (const providerId of resolveReference(model, new Set(), seenCombos)) {
+        providerIds.add(providerId);
+      }
+    }
+    return { ...combo, providerIds: [...providerIds] };
+  });
+}
+
+function getRequestComboName(request, comboNames) {
+  const explicitName = typeof request?.comboName === "string" ? request.comboName.trim() : "";
+  if (explicitName) return explicitName;
+  const requestedModel = typeof request?.requestedModel === "string" ? request.requestedModel.trim() : "";
+  return requestedModel && comboNames.has(requestedModel) ? requestedModel : "";
+}
+
 function timeAgo(timestamp) {
   const diff = Math.floor((Date.now() - new Date(timestamp)) / 1000);
   if (diff < 60) return `${diff}s ago`;
@@ -39,7 +140,9 @@ function TimeAgo({ timestamp }) {
   return <>{timeAgo(timestamp)}</>;
 }
 
-function RecentRequests({ requests = [] }) {
+function RecentRequests({ requests = [], combos = [] }) {
+  const comboNames = useMemo(() => new Set(combos.map((combo) => combo.name).filter(Boolean)), [combos]);
+
   return (
     <Card className="flex min-w-0 flex-col overflow-hidden" padding="sm" style={{ height: 480 }}>
       {/* Header */}
@@ -63,12 +166,24 @@ function RecentRequests({ requests = [] }) {
             <tbody className="divide-y divide-border/50">
               {requests.map((r, i) => {
                 const ok = !r.status || r.status === "ok" || r.status === "success";
+                const comboName = getRequestComboName(r, comboNames);
+                const leafModel = r.model || r.rawModel || "Unknown model";
+                const title = comboName
+                  ? `${comboName} → ${r.provider ? `${r.provider}/` : ""}${leafModel}`
+                  : leafModel;
                 return (
                   <tr key={i} className="hover:bg-bg-subtle transition-colors">
                     <td className="py-1.5">
                       <span className={`block w-1.5 h-1.5 rounded-full ${ok ? "bg-success" : "bg-error"}`} />
                     </td>
-                    <td className="py-1.5 font-mono truncate max-w-[120px]" title={r.model}>{r.model}</td>
+                    <td className="max-w-[140px] py-1.5" title={title}>
+                      <div className={`truncate font-mono ${comboName ? "font-semibold text-violet-500" : ""}`}>
+                        {comboName || leafModel}
+                      </div>
+                      {comboName && leafModel !== comboName && (
+                        <div className="truncate font-mono text-[10px] text-text-muted">→ {leafModel}</div>
+                      )}
+                    </td>
                     <td className="py-1.5 text-right whitespace-nowrap">
                       <span className="text-primary">{fmt(r.promptTokens)}↑</span>
                       {" "}
@@ -213,6 +328,7 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
   const [tableView, setTableView] = useState("model");
   const [viewMode, setViewMode] = useState("costs");
   const [providers, setProviders] = useState([]);
+  const [combos, setCombos] = useState([]);
   const [periodLocal, setPeriodLocal] = useState("today");
   const isInitialLoad = useRef(true);
   const hasLoadedStats = useRef(false);
@@ -223,15 +339,20 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
   // Fetch connected providers once, deduplicate by provider type
   // Always include noAuth free providers (e.g. opencode) regardless of connections
   useEffect(() => {
-    Promise.all([
+    Promise.allSettled([
       fetch("/api/providers").then((r) => r.ok ? r.json() : null),
       fetch("/api/provider-nodes").then((r) => r.ok ? r.json() : null),
+      fetch("/api/combos").then((r) => r.ok ? r.json() : null),
+      fetch("/api/models/alias").then((r) => r.ok ? r.json() : null),
     ])
-      .then(([d, nodesData]) => {
+      .then((results) => results.map((result) => result.status === "fulfilled" ? result.value : null))
+      .then(([d, nodesData, combosData, aliasesData]) => {
         // Build node name lookup for custom providers
         const nodeNameMap = {};
+        const nodePrefixMap = {};
         for (const node of (nodesData?.nodes || [])) {
           nodeNameMap[node.id] = node.name;
+          nodePrefixMap[node.id] = node.prefix;
         }
         const seen = new Set();
         const unique = (d?.connections || []).filter((c) => {
@@ -243,11 +364,19 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
         }).map((c) => ({
           ...c,
           nodeName: nodeNameMap[c.provider] || null,
+          providerPrefix: nodePrefixMap[c.provider] || null,
         }));
         const noAuthProviders = Object.values(FREE_PROVIDERS)
           .filter((p) => p.noAuth && !seen.has(p.id) && isLLMProvider(p.id))
           .map((p) => ({ provider: p.id, name: p.name }));
-        setProviders([...unique, ...noAuthProviders]);
+        const providerList = [...unique, ...noAuthProviders];
+        const llmCombos = (combosData?.combos || []).filter((combo) => !combo.kind || combo.kind === "llm");
+        setProviders(providerList);
+        setCombos(resolveComboProviders(
+          llmCombos,
+          providerList,
+          aliasesData?.aliases,
+        ));
       })
       .catch(() => {});
   }, []);
@@ -445,6 +574,10 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
       <span className="material-symbols-outlined text-[32px] animate-spin">progress_activity</span>
     </div>
   );
+  const recentRequests = stats?.recentRequests || [];
+  const comboNames = new Set(combos.map((combo) => combo.name).filter(Boolean));
+  const lastRequest = recentRequests[0];
+  const lastCombo = getRequestComboName(lastRequest, comboNames);
 
   return (
     <div className="flex min-w-0 flex-col gap-6">
@@ -477,11 +610,13 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
         <div className="grid min-w-0 grid-cols-1 items-stretch gap-2 lg:grid-cols-[minmax(0,2fr)_minmax(280px,1fr)]">
           <ProviderTopology
             providers={providers}
+            combos={combos}
             activeRequests={stats.activeRequests || []}
-            lastProvider={stats.recentRequests?.[0]?.provider || ""}
+            lastProvider={lastRequest?.provider || ""}
+            lastCombo={lastCombo}
             errorProvider={stats.errorProvider || ""}
           />
-          <RecentRequests requests={stats.recentRequests || []} />
+          <RecentRequests requests={recentRequests} combos={combos} />
         </div>
       )}
 
