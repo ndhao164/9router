@@ -77,6 +77,14 @@ function getColorClasses(remainingPercentage) {
   };
 }
 
+function formatQuotaValue(value) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  }
+  if (typeof value === "string" && value.trim()) return value.trim();
+  return "N/A";
+}
+
 function sortQuotas(quotas, sortMode) {
   if (sortMode === "remaining-asc") {
     return [...quotas].sort((a, b) => {
@@ -167,7 +175,8 @@ export default function QuotaTable({
       <div className="space-y-px">
         {currentPageRows.map((quota) => {
           const isUnknown = quota.remaining === null;
-          const colors = getColorClasses(quota.remaining);
+          const isValueOnly = quota.showProgress === false;
+          const colors = getColorClasses(quota.neutral ? null : quota.remaining);
           const countdown = formatResetTime(quota.resetAt);
           const resetDisplay = formatResetTimeDisplay(quota.resetAt);
           // recurring defaults true: a missing flag means the quota
@@ -191,7 +200,23 @@ export default function QuotaTable({
 
               {/* Progress + used/total */}
               <div className={`min-w-0 flex-1 ${compact ? "space-y-1" : "space-y-1.5"}`}>
-                {isUnknown ? (
+                {isValueOnly ? (
+                  <div
+                    className="flex min-h-6 items-center gap-1.5"
+                    title={
+                      quota.total > 0
+                        ? `${quota.used.toLocaleString()} used / ${quota.total.toLocaleString()} total`
+                        : "Monthly credits remaining"
+                    }
+                  >
+                    <span className={`${compact ? "text-xs" : "text-sm"} font-semibold tabular-nums ${colors.text}`}>
+                      {formatQuotaValue(quota.creditAmount)}
+                    </span>
+                    <span className={`${compact ? "text-[10px]" : "text-xs"} text-text-muted`}>
+                      remaining
+                    </span>
+                  </div>
+                ) : isUnknown ? (
                   <div className={`${compact ? "h-1" : "h-1.5"} rounded-full border border-dashed ${colors.bgLight}`} />
                 ) : (
                   <div className={`${compact ? "h-1" : "h-1.5"} rounded-full overflow-hidden border ${colors.bgLight} ${
@@ -204,17 +229,19 @@ export default function QuotaTable({
                   </div>
                 )}
 
-                <div className={`flex items-center justify-between gap-1 min-w-0 ${compact ? "text-[10px]" : "text-xs"}`}>
-                  <span
-                    className="text-text-muted truncate"
-                    title={isUnknown ? (quota.quotaNote || "Daily inference quota is not reported") : `${quota.used.toLocaleString()} / ${quota.total.toLocaleString()}`}
-                  >
-                    {isUnknown ? "Daily endpoint may still work" : `${quota.used.toLocaleString()} / ${quota.total.toLocaleString()}`}
-                  </span>
-                  <span className={`font-medium ${colors.text} shrink-0`}>
-                    {isUnknown ? "Unknown" : `${quota.remaining}%`}
-                  </span>
-                </div>
+                {!isValueOnly && (
+                  <div className={`flex items-center justify-between gap-1 min-w-0 ${compact ? "text-[10px]" : "text-xs"}`}>
+                    <span
+                      className="text-text-muted truncate"
+                      title={isUnknown ? (quota.quotaNote || "Daily inference quota is not reported") : `${quota.used.toLocaleString()} / ${quota.total.toLocaleString()}`}
+                    >
+                      {isUnknown ? "Daily endpoint may still work" : `${quota.used.toLocaleString()} / ${quota.total.toLocaleString()}`}
+                    </span>
+                    <span className={`font-medium ${colors.text} shrink-0`}>
+                      {isUnknown ? "Unknown" : `${quota.remaining}%`}
+                    </span>
+                  </div>
+                )}
               </div>
 
               {/* Reset time */}

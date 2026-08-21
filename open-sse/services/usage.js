@@ -6,6 +6,7 @@ import { getGitHubUsage } from "./usage/github.js";
 import { getGeminiUsage, getAntigravityUsage } from "./usage/google.js";
 import { getClaudeUsage } from "./usage/claude.js";
 import { getCodexUsage, consumeCodexRateLimitResetCredit, getCodexRateLimitResetCredits } from "./usage/codex.js";
+import { isOpenAICodexQuotaConnection } from "./codexQuota.js";
 
 export { consumeCodexRateLimitResetCredit, getCodexRateLimitResetCredits };
 import { getKiroUsage } from "./usage/kiro.js";
@@ -34,7 +35,20 @@ const USAGE_HANDLERS = {
   "gemini-cli": (c) => getGeminiUsage(c.accessToken, c.providerDataWithProjectId, c.proxyOptions),
   antigravity: (c) => getAntigravityUsage(c.accessToken, c.providerSpecificData, c.proxyOptions),
   claude: (c) => getClaudeUsage(c.accessToken, c.proxyOptions, { force: c.force }),
-  codex: (c) => getCodexUsage(c.accessToken, c.proxyOptions),
+  codex: (c) => getCodexUsage(c.accessToken, c.proxyOptions, c.providerSpecificData),
+  // Never send an OpenAI Platform API key to chatgpt.com. This branch is for
+  // imported/migrated OpenAI OAuth connections only; the route's auth gate
+  // keeps ordinary API-key connections out of the quota flow.
+  openai: (c) => {
+    if (!isOpenAICodexQuotaConnection(c)) {
+      return {
+        message: "Codex quota is only available for an imported ChatGPT OAuth connection; OpenAI Platform API keys are not supported.",
+      };
+    }
+    return c.accessToken
+      ? getCodexUsage(c.accessToken, c.proxyOptions, c.providerSpecificData)
+      : { message: "Codex quota requires a ChatGPT OAuth access token. Please re-authorize the connection." };
+  },
   kiro: (c) => getKiroUsage(c.accessToken, c.providerSpecificData, c.proxyOptions),
   qoder: async (c) => {
     // PAT (pt-...) connections must be exchanged to a job token before the

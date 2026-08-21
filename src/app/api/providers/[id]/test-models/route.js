@@ -4,6 +4,7 @@ import { getProviderModels, PROVIDER_ID_TO_ALIAS } from "open-sse/config/provide
 import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider } from "@/shared/constants/providers";
 import { UPDATER_CONFIG } from "@/shared/constants/config";
 import { pingModelByKind } from "@/app/api/models/test/ping";
+import { isOpenAICodexQuotaConnection, isUnmarkedOpenAIOAuthConnection } from "open-sse/services/codexQuota.js";
 
 /**
  * POST /api/providers/[id]/test-models
@@ -16,6 +17,19 @@ export async function POST(request, { params }) {
     const connection = await getProviderConnectionById(id);
     if (!connection) {
       return NextResponse.json({ error: "Connection not found" }, { status: 404 });
+    }
+
+    if (
+      connection.providerSpecificData?.usageOnly === true
+      || isOpenAICodexQuotaConnection(connection)
+      || isUnmarkedOpenAIOAuthConnection(connection)
+    ) {
+      return NextResponse.json({
+        error: isOpenAICodexQuotaConnection(connection)
+          ? "Quota-only Codex credentials cannot be used for model tests"
+          : "Unmarked OpenAI OAuth credentials cannot be used for model tests",
+        ...(isOpenAICodexQuotaConnection(connection) ? { quotaOnly: true } : {}),
+      }, { status: 400 });
     }
 
     const providerId = connection.provider;

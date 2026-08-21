@@ -292,6 +292,11 @@ describe("quota auto-ping", () => {
 
     await runQuotaAutoPingTick(deps, state);
 
+    expect(getCodexUsage).toHaveBeenCalledWith(
+      "token",
+      expect.objectContaining({ strictProxy: false }),
+      { workspaceId: "ws-1" },
+    );
     const executor = deps.getExecutor.mock.results[0].value;
     expect(deps.getExecutor).toHaveBeenCalledWith("codex");
     expect(executor.execute).toHaveBeenCalledWith(expect.objectContaining({

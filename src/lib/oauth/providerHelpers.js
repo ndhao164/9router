@@ -76,8 +76,14 @@ export function extractCodexAccountInfo(idToken) {
   const chatgpt = payload["https://api.openai.com/auth"] || {};
   return {
     email: payload.email,
-    chatgptAccountId: chatgpt.chatgpt_account_id || payload.account_id,
-    chatgptPlanType: chatgpt.chatgpt_plan_type || payload.plan_type,
+    chatgptAccountId:
+      payload["https://api.openai.com/auth.chatgpt_account_id"] ||
+      chatgpt.chatgpt_account_id ||
+      payload.account_id,
+    chatgptPlanType:
+      payload["https://api.openai.com/auth.chatgpt_plan_type"] ||
+      chatgpt.chatgpt_plan_type ||
+      payload.plan_type,
   };
 }
 

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getProviderConnections } from "@/lib/localDb";
 import { backfillCodexEmails } from "@/lib/oauth/providers";
+import { isOpenAICodexQuotaConnection } from "open-sse/services/codexQuota.js";
 import { USAGE_APIKEY_PROVIDERS, USAGE_SUPPORTED_PROVIDERS } from "@/shared/constants/providers";
 
 const SAFE_FIELDS = [
@@ -17,7 +18,7 @@ const SAFE_PSD_FIELDS = [
   "connectionProxyEnabled", "connectionProxyUrl", "connectionNoProxy",
   "githubLogin", "githubName", "githubEmail", "githubUserId",
   "username", "firstName", "lastName", "authMethod", "authKind",
-  "profileArn",
+  "profileArn", "usageOnly", "chatgptAccountId", "chatgptPlanType", "workspaceId",
 ];
 
 const DEFAULT_PAGE_SIZE = 20;
@@ -44,8 +45,18 @@ function sanitize(c) {
 }
 
 function isUsageEligible(connection) {
+  if (connection.provider === "openai") {
+    return isOpenAICodexQuotaConnection(connection)
+      && (connection.authType === "oauth" || connection.authType === "access_token");
+  }
+
+  if (connection.provider === "codex") {
+    return connection.authType === "oauth" || connection.authType === "access_token";
+  }
+
   return USAGE_SUPPORTED_PROVIDERS.includes(connection.provider) && (
-    connection.authType === "oauth" || USAGE_APIKEY_PROVIDERS.includes(connection.provider)
+    connection.authType === "oauth" ||
+    USAGE_APIKEY_PROVIDERS.includes(connection.provider)
   );
 }
 

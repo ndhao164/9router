@@ -5,6 +5,7 @@ import {
   updateProviderConnection,
   deleteProviderConnection,
 } from "@/models";
+import { isOpenAICodexQuotaConnection } from "open-sse/services/codexQuota.js";
 
 function normalizeProxyConfig(body = {}) {
   const hasAnyProxyField =
@@ -152,6 +153,31 @@ export async function PUT(request, { params }) {
         } else {
           updateData.providerSpecificData.proxyPoolId = proxyPoolResult.proxyPoolId;
         }
+      }
+    }
+
+    // `usageOnly` is a server-controlled routing boundary for ChatGPT quota
+    // credentials stored under OpenAI. Do not let a generic connection update
+    // turn those credentials into an inference account.
+    if (existing.providerSpecificData?.usageOnly === true || isOpenAICodexQuotaConnection(existing)) {
+      updateData.providerSpecificData = {
+        ...(updateData.providerSpecificData || existing.providerSpecificData),
+        usageOnly: true,
+        ...(existing.providerSpecificData?.authMethod === "codex_oauth" ||
+          updateData.providerSpecificData?.authMethod === "codex_oauth"
+          ? { authMethod: "codex_oauth" }
+          : {}),
+      };
+      updateData.isActive = false;
+    } else if (existing.provider === "openai" && updateData.providerSpecificData) {
+      // Only the Codex import flow may create the quota-only marker.  A
+      // normal connection edit must not turn an arbitrary Platform OAuth/key
+      // record into a WHAM credential by posting these fields.
+      if (updateData.providerSpecificData.usageOnly === true) {
+        delete updateData.providerSpecificData.usageOnly;
+      }
+      if (updateData.providerSpecificData.authMethod === "codex_oauth") {
+        delete updateData.providerSpecificData.authMethod;
       }
     }
 

@@ -78,4 +78,7 @@ export default {
   embeddingConfig: { baseUrl: "https://api.openai.com/v1/embeddings", authType: "apikey", authHeader: "bearer" },
   imageConfig: { baseUrl: "https://api.openai.com/v1/images/generations" },
   searchViaChat: { defaultModel: "gpt-4o-mini", pricingUrl: "https://openai.com/api/pricing" },
+  // Codex quota is available only for OpenAI connections carrying a ChatGPT
+  // OAuth access token. Platform API-key connections remain ineligible.
+  features: { usage: true },
 };

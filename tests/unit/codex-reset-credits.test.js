@@ -91,6 +91,58 @@ describe("Codex reset credits", () => {
     });
   });
 
+  it("accepts the nested WHAM reset-credit envelope", async () => {
+    mocks.proxyAwareFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        data: {
+          available_count: "3",
+          credits: [
+            {
+              state: "available",
+              granted_at: "2099-06-18T00:25:18Z",
+              expires_at: "2099-07-18T00:25:18Z",
+            },
+          ],
+        },
+      }),
+    });
+
+    const { getCodexRateLimitResetCredits } = await import("../../open-sse/services/usage/codex.js");
+    const result = await getCodexRateLimitResetCredits("token");
+
+    expect(result).toEqual({
+      availableCount: 3,
+      credits: [{
+        status: "available",
+        grantedAt: "2099-06-18T00:25:18.000Z",
+        expiresAt: "2099-07-18T00:25:18.000Z",
+      }],
+    });
+  });
+
+  it("derives available count from unredeemed, non-expired credit details", async () => {
+    mocks.proxyAwareFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        data: {
+          credits: [
+            { status: "available", expires_at: "2099-07-18T00:25:18Z" },
+            { state: "used", expires_at: "2099-07-18T00:25:18Z" },
+            { status: "expired", expires_at: "2000-07-18T00:25:18Z" },
+          ],
+        },
+      }),
+    });
+
+    const { getCodexRateLimitResetCredits } = await import("../../open-sse/services/usage/codex.js");
+    const result = await getCodexRateLimitResetCredits("token");
+
+    expect(result.availableCount).toBe(1);
+  });
+
   it("GET refreshes OAuth credentials before returning reset credit details", async () => {
     const connection = {
       id: "conn_1",
@@ -194,5 +246,108 @@ describe("Codex reset credits", () => {
       expect.any(String),
       expect.objectContaining({ strictProxy: false }),
     );
+  });
+
+  it("GET accepts an OpenAI connection marked as Codex quota-only", async () => {
+    const connection = {
+      id: "openai-quota-1",
+      provider: "openai",
+      authType: "oauth",
+      accessToken: "chatgpt-token",
+      refreshToken: "chatgpt-refresh-token",
+      providerSpecificData: {
+        usageOnly: true,
+        authMethod: "codex_oauth",
+        chatgptAccountId: "acct_123",
+      },
+    };
+    const refreshedConnection = { ...connection, accessToken: "refreshed-chatgpt-token" };
+    const resetCredits = { availableCount: 2, credits: [] };
+    mocks.getProviderConnectionById.mockResolvedValue(connection);
+    mocks.refreshAndUpdateCredentials.mockResolvedValue({ connection: refreshedConnection });
+    mocks.getCodexRateLimitResetCredits.mockResolvedValue(resetCredits);
+
+    const { GET } = await import("../../src/app/api/usage/[connectionId]/codex-reset-credits/route.js");
+    const response = await GET(new Request("http://localhost/api/usage/openai-quota-1/codex-reset-credits"), {
+      params: Promise.resolve({ connectionId: "openai-quota-1" }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(resetCredits);
+    expect(mocks.refreshAndUpdateCredentials).toHaveBeenCalledWith(
+      connection,
+      false,
+      expect.objectContaining({ strictProxy: false }),
+    );
+    expect(mocks.getCodexRateLimitResetCredits).toHaveBeenCalledWith(
+      "refreshed-chatgpt-token",
+      expect.objectContaining({ strictProxy: false }),
+      connection.providerSpecificData,
+    );
+  });
+
+  it("POST accepts an OpenAI access-token connection marked as Codex quota-only", async () => {
+    const connection = {
+      id: "openai-quota-2",
+      provider: "openai",
+      authType: "access_token",
+      accessToken: "chatgpt-token",
+      providerSpecificData: { usageOnly: true, chatgptAccountId: "acct_456" },
+    };
+    mocks.getProviderConnectionById.mockResolvedValue(connection);
+    mocks.consumeCodexRateLimitResetCredit.mockResolvedValue({
+      ok: true,
+      noCredit: false,
+      status: 200,
+      code: "reset",
+      windowsReset: 1,
+      raw: { credit: { status: "redeemed" } },
+    });
+
+    const { POST } = await import("../../src/app/api/usage/[connectionId]/codex-reset-credits/route.js");
+    const response = await POST(new Request("http://localhost/api/usage/openai-quota-2/codex-reset-credits", { method: "POST" }), {
+      params: Promise.resolve({ connectionId: "openai-quota-2" }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ code: "reset", reset: true, windows_reset: 1 });
+    expect(mocks.refreshAndUpdateCredentials).not.toHaveBeenCalled();
+    expect(mocks.consumeCodexRateLimitResetCredit).toHaveBeenCalledWith(
+      "chatgpt-token",
+      expect.any(String),
+      expect.objectContaining({ strictProxy: false }),
+    );
+  });
+
+  it.each([
+    {
+      label: "an ordinary OpenAI OAuth connection",
+      authType: "oauth",
+      providerSpecificData: {},
+    },
+    {
+      label: "an OpenAI Platform API-key connection",
+      authType: "apikey",
+      apiKey: "sk-platform",
+      providerSpecificData: {},
+    },
+  ])("rejects $label", async ({ authType, apiKey, providerSpecificData }) => {
+    mocks.getProviderConnectionById.mockResolvedValue({
+      id: "openai-non-codex",
+      provider: "openai",
+      authType,
+      accessToken: authType === "oauth" ? "ordinary-oauth-token" : undefined,
+      apiKey,
+      providerSpecificData,
+    });
+
+    const { GET } = await import("../../src/app/api/usage/[connectionId]/codex-reset-credits/route.js");
+    const response = await GET(new Request("http://localhost/api/usage/openai-non-codex/codex-reset-credits"), {
+      params: Promise.resolve({ connectionId: "openai-non-codex" }),
+    });
+
+    expect(response.status).toBe(400);
+    expect(mocks.resolveConnectionProxyConfig).not.toHaveBeenCalled();
+    expect(mocks.getCodexRateLimitResetCredits).not.toHaveBeenCalled();
   });
 });

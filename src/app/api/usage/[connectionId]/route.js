@@ -4,6 +4,7 @@ import "open-sse/index.js";
 import { getProviderConnectionById, updateProviderConnection } from "@/lib/localDb";
 import { getUsageForProvider } from "open-sse/services/usage.js";
 import { getExecutor } from "open-sse/executors/index.js";
+import { isOpenAICodexQuotaConnection, isCodexQuotaConnection } from "open-sse/services/codexQuota.js";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { USAGE_APIKEY_PROVIDERS } from "@/shared/constants/providers";
 
@@ -21,7 +22,10 @@ function isAuthExpiredMessage(usage) {
  * @returns Promise<{ connection, refreshed: boolean }>
  */
 export async function refreshAndUpdateCredentials(connection, force = false, proxyOptions = null) {
-  const executor = getExecutor(connection.provider);
+  const credentialProvider = isOpenAICodexQuotaConnection(connection)
+    ? "codex"
+    : connection.provider;
+  const executor = getExecutor(credentialProvider);
 
   // Build credentials object from connection
   const credentials = {
@@ -132,16 +136,29 @@ export async function GET(request, { params }) {
       return Response.json({ error: "Connection not found" }, { status: 404 });
     }
 
-    // Allow OAuth connections, plus whitelisted apikey providers (glm/minimax/kiro/...)
+    // Allow OAuth/imported access-token connections, plus whitelisted API-key
+    // providers (glm/minimax/kiro/...). ChatGPT tokens imported without a
+    // refresh token use authType "access_token".
     // Kiro's headless api-key flow persists authType "api_key" (underscore) while
     // generic apikey providers persist "apikey" — accept both spellings here.
     const isOAuth = connection.authType === "oauth";
+    const isAccessToken = connection.authType === "access_token";
+    const isCodexQuotaAuth = isCodexQuotaConnection(connection)
+      && (isOAuth || isAccessToken);
     const isApikeyAuth =
       connection.authType === "apikey" || connection.authType === "api_key";
     const isApikeyEligible =
       isApikeyAuth && USAGE_APIKEY_PROVIDERS.includes(connection.provider);
 
-    if (!isOAuth && !isApikeyEligible) {
+    // Access-token usage is intentionally restricted to Codex credentials.
+    // In particular, an arbitrary OpenAI OAuth token must never be sent to
+    // ChatGPT's WHAM endpoint merely because its authType is access_token.
+    if ((!isOAuth && !isAccessToken && !isApikeyEligible) ||
+        ((isOAuth || isAccessToken) && !isCodexQuotaAuth && connection.provider === "openai")) {
+      return Response.json({ message: "Usage not available for this connection" });
+    }
+
+    if (isAccessToken && !isCodexQuotaAuth) {
       return Response.json({ message: "Usage not available for this connection" });
     }
 

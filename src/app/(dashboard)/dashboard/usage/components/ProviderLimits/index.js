@@ -42,6 +42,10 @@ import Card from "@/shared/components/Card";
 import { ConfirmModal, EditConnectionModal } from "@/shared/components";
 import { USAGE_SUPPORTED_PROVIDERS } from "@/shared/constants/providers";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
+import {
+  isCodexQuotaConnection,
+  isOpenAICodexQuotaConnection,
+} from "open-sse/services/codexQuota.js";
 
 // Maps the stored providerSpecificData.authMethod to a human label for Kiro.
 // Values come from the Kiro connect flows: builder-id/idc (device code),
@@ -95,7 +99,7 @@ function kiroRegion(conn) {
 }
 
 function getCodexResetCreditCount(quota) {
-  const value = quota?.raw?.resetCredits?.availableCount;
+  const value = quota?.resetCredits?.availableCount;
   const count = typeof value === "number" ? value : Number(value);
   return Number.isFinite(count) ? Math.max(0, count) : 0;
 }
@@ -271,7 +275,7 @@ export default function ProviderLimits() {
         quotas: parsedQuotas,
         plan: data.plan || null,
         message: data.message || null,
-        raw: data,
+        ...(data.resetCredits ? { resetCredits: data.resetCredits } : {}),
       };
 
       setQuotaData((prev) => ({
@@ -303,8 +307,9 @@ export default function ProviderLimits() {
   );
 
   const handleResetCodexLimit = useCallback(
-    async (connectionId, provider) => {
-      if (provider !== "codex" || resettingLimitId) return;
+    async (connection) => {
+      if (!isCodexQuotaConnection(connection) || resettingLimitId) return;
+      const { id: connectionId, provider } = connection;
 
       setResettingLimitId(connectionId);
       setErrors((prev) => ({ ...prev, [connectionId]: null }));
@@ -732,6 +737,10 @@ export default function ProviderLimits() {
 
   const handleDisableDepleted = () => {
     const ids = sortedConnections
+      // OpenAI ChatGPT imports are intentionally quota-only.  The server
+      // keeps them inactive and rejects activation, so bulk actions must not
+      // repeatedly attempt to toggle them.
+      .filter((c) => !isOpenAICodexQuotaConnection(c))
       .filter((c) => (c.isActive ?? true) && isConnectionDepleted(c))
       .map((c) => c.id);
     bulkSetActive(ids, false);
@@ -739,6 +748,7 @@ export default function ProviderLimits() {
 
   const handleEnableAvailable = () => {
     const ids = sortedConnections
+      .filter((c) => !isOpenAICodexQuotaConnection(c))
       .filter((c) => !(c.isActive ?? true) && !isConnectionDepleted(c))
       .map((c) => c.id);
     bulkSetActive(ids, true);
@@ -1028,7 +1038,8 @@ export default function ProviderLimits() {
 
           // Use table layout for all providers
           const isInactive = conn.isActive === false;
-          const isCodex = conn.provider === "codex";
+          const isCodex = isCodexQuotaConnection(conn);
+          const isQuotaOnly = isOpenAICodexQuotaConnection(conn);
           const resetCreditCount = getCodexResetCreditCount(quota);
           const isResettingLimit = resettingLimitId === conn.id;
           const rowBusy = deletingId === conn.id || togglingId === conn.id || isResettingLimit;
@@ -1218,7 +1229,9 @@ export default function ProviderLimits() {
                     <div
                       className="inline-flex items-center pl-0.5"
                       title={
-                        (conn.isActive ?? true)
+                        isQuotaOnly
+                          ? "Quota-only connection (cannot be enabled)"
+                          : (conn.isActive ?? true)
                           ? "Disable connection"
                           : "Enable connection"
                       }
@@ -1226,9 +1239,9 @@ export default function ProviderLimits() {
                       <Toggle
                         size="sm"
                         checked={conn.isActive ?? true}
-                        disabled={rowBusy}
+                        disabled={rowBusy || isQuotaOnly}
                         onChange={(nextActive) =>
-                          handleToggleConnectionActive(conn.id, nextActive)
+                          !isQuotaOnly && handleToggleConnectionActive(conn.id, nextActive)
                         }
                       />
                     </div>
@@ -1423,7 +1436,7 @@ export default function ProviderLimits() {
         onConfirm={async () => {
           const connection = resetConfirmState?.connection;
           if (!connection) return;
-          await handleResetCodexLimit(connection.id, connection.provider);
+          await handleResetCodexLimit(connection);
           setResetConfirmState(null);
         }}
         title="Reset Codex limit?"

@@ -314,11 +314,19 @@ export async function POST(request, { params }) {
           directPayload = JSON.parse(Buffer.from(padded, "base64").toString("utf8"));
         } catch {}
 
-        const accountId = info.chatgptAccountId || directPayload.account_id;
-        const planType = info.chatgptPlanType || directPayload.plan_type;
+        const accountId = info.chatgptAccountId
+          || directPayload["https://api.openai.com/auth.chatgpt_account_id"]
+          || directPayload.account_id;
+        const planType = info.chatgptPlanType
+          || directPayload["https://api.openai.com/auth.chatgpt_plan_type"]
+          || directPayload.plan_type;
         const email = info.email || directPayload.email;
 
-        const providerSpecificData = { authMethod: "access_token" };
+        const isOpenAICodexQuota = provider === "openai";
+        const providerSpecificData = {
+          authMethod: isOpenAICodexQuota ? "codex_oauth" : "access_token",
+          ...(isOpenAICodexQuota ? { usageOnly: true } : {}),
+        };
         if (accountId) providerSpecificData.chatgptAccountId = accountId;
         if (planType) providerSpecificData.chatgptPlanType = planType;
 
@@ -328,6 +336,7 @@ export async function POST(request, { params }) {
           accessToken: code,
           email: email || null,
           providerSpecificData,
+          ...(isOpenAICodexQuota ? { isActive: false } : {}),
           testStatus: "active",
         });
 

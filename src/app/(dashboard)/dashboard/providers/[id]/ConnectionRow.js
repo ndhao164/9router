@@ -70,10 +70,12 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
   };
 
   const rowAuthType = connection.authType || (isOAuth ? "oauth" : "apikey");
+  const isQuotaOnly = connection.providerSpecificData?.usageOnly === true
+    || connection.providerSpecificData?.authMethod === "codex_oauth";
   const isOAuthConnection = rowAuthType === "oauth";
   const isCookieConnection = rowAuthType === "cookie";
-  const authIcon = isCookieConnection ? "cookie" : isOAuthConnection ? "lock" : "key";
-  const authLabel = isOAuthConnection ? "OAuth" : isCookieConnection ? "Cookie" : "API Key";
+  const authIcon = isQuotaOnly ? "monitoring" : isCookieConnection ? "cookie" : isOAuthConnection ? "lock" : "key";
+  const authLabel = isQuotaOnly ? "Codex Quota" : isOAuthConnection ? "OAuth" : isCookieConnection ? "Cookie" : "API Key";
   const displayName = connection.name?.trim()
     || connection.email?.trim()
     || connection.displayName?.trim()
@@ -116,7 +118,7 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
     ? "active"  // Cooldown expired u2192 treat as active
     : connection.testStatus;
 
-  const getStatusVariant = () => getConnectionStatusVariant(connection.isActive, effectiveStatus);
+  const getStatusVariant = () => isQuotaOnly ? "primary" : getConnectionStatusVariant(connection.isActive, effectiveStatus);
 
   const getOneByOneVariant = () => {
     if (!oneByOneStatus) return "default";
@@ -136,7 +138,7 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
   };
 
   return (
-    <div className={`group flex min-w-0 flex-col gap-3 rounded-lg p-2 transition-colors hover:bg-black/[0.02] dark:hover:bg-white/[0.02] sm:flex-row sm:items-center sm:justify-between ${connection.isActive === false ? "opacity-60" : ""}`}>
+    <div className={`group flex min-w-0 flex-col gap-3 rounded-lg p-2 transition-colors hover:bg-black/[0.02] dark:hover:bg-white/[0.02] sm:flex-row sm:items-center sm:justify-between ${connection.isActive === false && !isQuotaOnly ? "opacity-60" : ""}`}>
       <div className="flex min-w-0 flex-1 items-start gap-2 sm:items-center sm:gap-3">
         {/* Priority arrows */}
         <div className="flex shrink-0 flex-col">
@@ -165,7 +167,7 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
           )}
           <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 sm:gap-2">
             <Badge variant={getStatusVariant()} size="sm" dot>
-              {connection.isActive === false ? "disabled" : (effectiveStatus || "Unknown")}
+              {isQuotaOnly ? "quota only" : connection.isActive === false ? "disabled" : (effectiveStatus || "Unknown")}
             </Badge>
             <Badge variant="default" size="sm">
               {authLabel}
@@ -266,12 +268,18 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
             <span className="text-[10px] leading-tight">Delete</span>
           </button>
         </div>
-        <Toggle
-          size="sm"
-          checked={connection.isActive ?? true}
-          onChange={onToggleActive}
-          title={(connection.isActive ?? true) ? "Disable connection" : "Enable connection"}
-        />
+        {isQuotaOnly ? (
+          <Tooltip text="This ChatGPT credential is used only to fetch Codex quota and is excluded from OpenAI inference routing.">
+            <span className="material-symbols-outlined text-[18px] text-primary">shield_lock</span>
+          </Tooltip>
+        ) : (
+          <Toggle
+            size="sm"
+            checked={connection.isActive ?? true}
+            onChange={onToggleActive}
+            title={(connection.isActive ?? true) ? "Disable connection" : "Enable connection"}
+          />
+        )}
       </div>
     </div>
   );
@@ -289,6 +297,7 @@ ConnectionRow.propTypes = {
     lastError: PropTypes.string,
     priority: PropTypes.number,
     globalPriority: PropTypes.number,
+    providerSpecificData: PropTypes.object,
   }).isRequired,
   proxyPools: PropTypes.arrayOf(PropTypes.shape({
     id: PropTypes.string,

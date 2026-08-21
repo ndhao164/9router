@@ -42,6 +42,22 @@ export default {
       url: "https://chatgpt.com/backend-api/wham/usage",
       resetCreditsUrl: "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits",
       resetCreditsConsumeUrl: "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume",
+      // Match the Codex Desktop request fingerprint used by ChatGPT's WHAM API.
+      // Authorization and ChatGPT-Account-Id are added dynamically per account.
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        Referer: "https://chatgpt.com/",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
+        "OpenAI-Beta": "codex-1",
+        "oai-language": "zh-CN",
+        originator: "Codex Desktop",
+        "sec-fetch-site": "none",
+        "sec-fetch-mode": "no-cors",
+        "sec-fetch-dest": "empty",
+        priority: "u=4, i",
+      },
+      timeoutMs: 20000,
     },
   },
   models: [

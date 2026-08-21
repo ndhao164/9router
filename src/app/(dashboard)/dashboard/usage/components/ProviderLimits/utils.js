@@ -337,6 +337,49 @@ export function getHiddenQuotaRows(provider, quotas = [], quotaVisibility = {}) 
   return quotas.filter((quota) => hidden.has(getQuotaVisibilityKey(quota)));
 }
 
+function normalizeCodexMonthlyCreditRow(monthlyCredits) {
+  if (!monthlyCredits || typeof monthlyCredits !== "object" || Array.isArray(monthlyCredits)) {
+    return null;
+  }
+
+  const finiteNumber = (value) => {
+    if (typeof value === "number") return Number.isFinite(value) ? value : null;
+    if (typeof value !== "string" || !value.trim()) return null;
+    const parsed = Number(value.trim());
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+  const used = finiteNumber(monthlyCredits.used);
+  const total = finiteNumber(monthlyCredits.total);
+  const remaining = finiteNumber(monthlyCredits.remaining ?? monthlyCredits.balance);
+  const unlimited = monthlyCredits.unlimited === true;
+
+  // Match Cockpit's presentation semantics: this is a remaining-balance line,
+  // not another rate-limit progress bar, and an exhausted zero balance is not
+  // rendered as a misleading quota bucket.
+  if (!unlimited && !(remaining !== null && remaining > 0)) return null;
+
+  const explicitPercentage = finiteNumber(monthlyCredits.remainingPercentage);
+  const remainingPercentage = unlimited
+    ? 100
+    : explicitPercentage !== null
+      ? explicitPercentage
+      : total !== null && total > 0 && remaining !== null
+        ? (remaining / total) * 100
+        : 100;
+
+  return {
+    name: "Credits",
+    used: used ?? 0,
+    total: total ?? 0,
+    resetAt: monthlyCredits.resetAt || null,
+    remainingPercentage: Math.max(0, Math.min(100, Math.round(remainingPercentage))),
+    showProgress: false,
+    neutral: true,
+    creditAmount: unlimited ? "∞" : remaining,
+    unlimited,
+  };
+}
+
 /**
  * Parse provider-specific quota structures into normalized array
  * @param {string} provider - Provider name (github, antigravity, codex, kiro, claude)
@@ -385,6 +428,7 @@ export function parseQuotaData(provider, data) {
         break;
 
       case "codex":
+      case "openai":
         if (data.quotas) {
           Object.entries(data.quotas).forEach(([quotaType, quota]) => {
             normalizedQuotas.push({
@@ -393,8 +437,13 @@ export function parseQuotaData(provider, data) {
               total: quota.total || 0,
               remaining: quota.remaining,
               resetAt: quota.resetAt || null,
+              windowMinutes: quota.windowMinutes ?? null,
             });
           });
+        }
+        {
+          const monthlyCreditRow = normalizeCodexMonthlyCreditRow(data.monthlyCredits);
+          if (monthlyCreditRow) normalizedQuotas.push(monthlyCreditRow);
         }
         break;
 

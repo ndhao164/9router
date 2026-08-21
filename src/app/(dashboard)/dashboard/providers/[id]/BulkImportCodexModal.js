@@ -14,6 +14,16 @@ const PLACEHOLDER = `[
   }
 ]`;
 
+const OPENAI_PLACEHOLDER = `{
+  "auth_mode": "chatgpt",
+  "tokens": {
+    "access_token": "eyJhbGc...",
+    "refresh_token": "rt_...",
+    "id_token": "eyJhbGc...",
+    "account_id": "acct_..."
+  }
+}`;
+
 function normalizeToArray(parsed) {
   if (Array.isArray(parsed)) return parsed;
   if (parsed && typeof parsed === "object") {
@@ -23,7 +33,7 @@ function normalizeToArray(parsed) {
   return null;
 }
 
-export default function BulkImportCodexModal({ isOpen, onClose, onSuccess }) {
+export default function BulkImportCodexModal({ isOpen, targetProvider = "codex", onClose, onSuccess }) {
   const [jsonText, setJsonText] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [parseError, setParseError] = useState("");
@@ -63,7 +73,7 @@ export default function BulkImportCodexModal({ isOpen, onClose, onSuccess }) {
       const res = await fetch("/api/oauth/codex/bulk-import", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ accounts }),
+        body: JSON.stringify({ accounts, targetProvider }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -84,17 +94,23 @@ export default function BulkImportCodexModal({ isOpen, onClose, onSuccess }) {
   const failedItems = result?.results?.filter((r) => !r.ok) || [];
 
   return (
-    <Modal isOpen={isOpen} title={translate("Bulk Add Codex Accounts")} onClose={handleClose}>
+    <Modal
+      isOpen={isOpen}
+      title={targetProvider === "openai" ? "Import Codex Quota into OpenAI" : translate("Bulk Add Codex Accounts")}
+      onClose={handleClose}
+    >
       <div className="flex flex-col gap-4">
         <p className="text-xs text-text-muted">
-          {translate(
-            "Paste an array of codex account JSON objects. Each must include accessToken (and ideally refreshToken, idToken)."
-          )}
+          {targetProvider === "openai"
+            ? "Paste Codex account JSON with accessToken (ideally refreshToken and idToken too). These connections are quota-only and are never used for OpenAI API routing."
+            : translate(
+                "Paste an array of codex account JSON objects. Each must include accessToken (and ideally refreshToken, idToken)."
+              )}
         </p>
 
         <textarea
           className="w-full rounded border border-accent/30 bg-sidebar p-2 text-sm font-mono resize-y min-h-[240px] focus:outline-none focus:ring-1 focus:ring-primary"
-          placeholder={PLACEHOLDER}
+          placeholder={targetProvider === "openai" ? OPENAI_PLACEHOLDER : PLACEHOLDER}
           value={jsonText}
           onChange={(e) => setJsonText(e.target.value)}
           disabled={submitting}
@@ -145,6 +161,7 @@ export default function BulkImportCodexModal({ isOpen, onClose, onSuccess }) {
 
 BulkImportCodexModal.propTypes = {
   isOpen: PropTypes.bool.isRequired,
+  targetProvider: PropTypes.oneOf(["codex", "openai"]),
   onClose: PropTypes.func.isRequired,
   onSuccess: PropTypes.func,
 };

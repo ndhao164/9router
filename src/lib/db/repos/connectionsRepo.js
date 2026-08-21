@@ -67,6 +67,11 @@ function deriveConnectionName(data, fallbackName) {
   return fallbackName;
 }
 
+function getWorkspaceIdentity(connection) {
+  const psd = connection?.providerSpecificData || {};
+  return psd.chatgptAccountId || psd.workspaceId || psd.accountId || null;
+}
+
 export async function getProviderConnections(filter = {}) {
   const db = await getAdapter();
   const where = [];
@@ -110,7 +115,10 @@ export async function createProviderConnection(data) {
     let existing = null;
     if (data.authType === "oauth" && data.email) {
       const incomingUsername = data.providerSpecificData?.username;
-      const incomingWs = data.providerSpecificData?.chatgptAccountId;
+      const incomingWs = getWorkspaceIdentity(data);
+      const isOpenAIQuotaImport = data.provider === "openai"
+        && (data.providerSpecificData?.usageOnly === true
+          || data.providerSpecificData?.authMethod === "codex_oauth");
       existing = all.find(c => {
         if (c.authType !== "oauth" || c.email !== data.email) return false;
 
@@ -119,13 +127,13 @@ export async function createProviderConnection(data) {
         // existing bare-email row overwrites the first account's token pair and
         // makes it look "invalid" after adding a second account. Only update an
         // existing Codex row when both rows expose the same ChatGPT account ID.
-        if (data.provider === "codex") {
-          const existingWs = c.providerSpecificData?.chatgptAccountId;
+        if (data.provider === "codex" || isOpenAIQuotaImport) {
+          const existingWs = getWorkspaceIdentity(c);
           return !!incomingWs && !!existingWs && incomingWs === existingWs;
         }
 
         // Workspace providers use workspace ID when both sides have it
-        const existingWs = c.providerSpecificData?.chatgptAccountId;
+        const existingWs = getWorkspaceIdentity(c);
         if (incomingWs && existingWs) return incomingWs === existingWs;
         if (incomingWs && !existingWs) return false;
         if (!incomingWs && existingWs) return false;

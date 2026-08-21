@@ -15,6 +15,7 @@ export async function POST(request, { params }) {
       valid: result.valid,
       error: result.error,
       refreshed: result.refreshed || false,
+      ...(result.quotaOnly ? { quotaOnly: true } : {}),
     });
   } catch (error) {
     console.log("Error testing connection:", error);

@@ -3,6 +3,7 @@ import "open-sse/index.js";
 
 import { getProviderConnectionById } from "@/lib/localDb";
 import { consumeCodexRateLimitResetCredit, getCodexRateLimitResetCredits } from "open-sse/services/usage.js";
+import { isCodexQuotaConnection } from "open-sse/services/codexQuota.js";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { refreshAndUpdateCredentials } from "../route.js";
 
@@ -53,8 +54,8 @@ async function getCodexConnection(connectionId) {
     return { response: Response.json({ error: "Connection not found" }, { status: 404 }) };
   }
 
-  if (connection.provider !== "codex") {
-    return { response: Response.json({ error: "Codex reset credits are only available for Codex connections." }, { status: 400 }) };
+  if (!isCodexQuotaConnection(connection)) {
+    return { response: Response.json({ error: "Codex reset credits are only available for Codex or OpenAI Codex quota connections." }, { status: 400 }) };
   }
 
   const isOAuth = connection.authType === "oauth";

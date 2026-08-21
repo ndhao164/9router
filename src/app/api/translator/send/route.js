@@ -1,5 +1,6 @@
 import { getProviderConnections, updateProviderConnection } from "@/lib/localDb.js";
 import { getExecutor } from "open-sse/index.js";
+import { isOpenAICodexQuotaConnection, isUnmarkedOpenAIOAuthConnection } from "open-sse/services/codexQuota.js";
 
 async function persistRefreshedCredentials(connection, newCredentials) {
   const updateData = {};
@@ -41,7 +42,12 @@ export async function POST(request) {
     }
 
     const connections = await getProviderConnections({ provider });
-    const connection = connections.find(c => c.isActive !== false);
+    const connection = connections.find(c => (
+      c.isActive !== false
+      && c.providerSpecificData?.usageOnly !== true
+      && !isOpenAICodexQuotaConnection(c)
+      && !isUnmarkedOpenAIOAuthConnection(c)
+    ));
     if (!connection) {
       return Response.json({ success: false, error: `No active connection for provider: ${provider}` }, { status: 400 });
     }

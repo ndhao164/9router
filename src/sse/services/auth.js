@@ -1,4 +1,5 @@
 import { getProviderConnections, getApiKeyByValue, validateApiKey, updateProviderConnection, getSettings, getProxyPools } from "@/lib/localDb";
+import { isOpenAICodexQuotaConnection, isUnmarkedOpenAIOAuthConnection } from "open-sse/services/codexQuota.js";
 import { resolveConnectionProxyConfig, pickProxyPoolId } from "@/lib/network/connectionProxy";
 import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockUpdate, getModelLockUntil } from "open-sse/services/accountFallback.js";
 import { MAX_RATE_LIMIT_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
@@ -86,6 +87,13 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
 
     // Filter out model-locked and excluded connections
     const availableConnections = scopedConnections.filter(c => {
+      // Quota-only ChatGPT credentials imported under the OpenAI provider are
+      // intentionally never eligible for inference routing.
+      if (
+        c.providerSpecificData?.usageOnly === true
+        || isOpenAICodexQuotaConnection(c)
+        || isUnmarkedOpenAIOAuthConnection(c)
+      ) return false;
       if (excludeSet.has(c.id)) return false;
       if (isModelLockActive(c, model)) return false;
       return true;

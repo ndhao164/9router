@@ -172,6 +172,16 @@ export async function POST(request) {
       mergedProviderSpecificData.proxyPoolId = proxyPoolId;
     }
 
+    // Codex quota markers are assigned only by the dedicated OAuth import
+    // endpoint.  `/api/providers` creates Platform API-key connections and
+    // must not accept a client-supplied marker that changes their semantics.
+    if (provider === "openai") {
+      delete mergedProviderSpecificData.usageOnly;
+      if (mergedProviderSpecificData.authMethod === "codex_oauth") {
+        delete mergedProviderSpecificData.authMethod;
+      }
+    }
+
     const newConnection = await createProviderConnection({
       provider,
       authType: isWebCookieProvider ? "cookie" : "apikey",

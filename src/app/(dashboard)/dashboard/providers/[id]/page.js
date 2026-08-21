@@ -637,10 +637,14 @@ export default function ProviderDetailPage() {
   };
 
   const handleRunOneByOneTest = async () => {
-    if (oneByOneRunning || connections.length === 0) return;
+    const testableConnections = connections.filter((connection) => (
+      connection.providerSpecificData?.usageOnly !== true
+      && connection.providerSpecificData?.authMethod !== "codex_oauth"
+    ));
+    if (oneByOneRunning || testableConnections.length === 0) return;
 
     const queuedState = Object.fromEntries(
-      connections.map((connection) => [connection.id, { state: "queued", error: null }]),
+      testableConnections.map((connection) => [connection.id, { state: "queued", error: null }]),
     );
 
     stopOneByOneRef.current = false;
@@ -648,16 +652,16 @@ export default function ProviderDetailPage() {
     setOneByOneStopping(false);
     setOneByOneCurrentConnectionId(null);
     setOneByOneResults(queuedState);
-    setOneByOneSummary({ total: connections.length, completed: 0, passed: 0, failed: 0, stopped: false });
+    setOneByOneSummary({ total: testableConnections.length, completed: 0, passed: 0, failed: 0, stopped: false });
 
     let passed = 0;
     let failed = 0;
 
     try {
-      for (let index = 0; index < connections.length; index += 1) {
+      for (let index = 0; index < testableConnections.length; index += 1) {
         if (stopOneByOneRef.current) {
           setOneByOneSummary({
-            total: connections.length,
+            total: testableConnections.length,
             completed: index,
             passed,
             failed,
@@ -666,7 +670,7 @@ export default function ProviderDetailPage() {
           break;
         }
 
-        const connection = connections[index];
+        const connection = testableConnections[index];
         setOneByOneCurrentConnectionId(connection.id);
         setOneByOneResults((prev) => ({
           ...prev,
@@ -703,14 +707,14 @@ export default function ProviderDetailPage() {
         }
 
         setOneByOneSummary({
-          total: connections.length,
+          total: testableConnections.length,
           completed: index + 1,
           passed,
           failed,
           stopped: false,
         });
 
-        if (index < connections.length - 1) {
+        if (index < testableConnections.length - 1) {
           await sleep(ONE_BY_ONE_DELAY_MS);
         }
       }
@@ -1476,7 +1480,10 @@ export default function ProviderDetailPage() {
                     variant="secondary"
                     icon="sync"
                     onClick={handleRunOneByOneTest}
-                    disabled={oneByOneRunning}
+                    disabled={oneByOneRunning || connections.every((connection) => (
+                      connection.providerSpecificData?.usageOnly === true
+                      || connection.providerSpecificData?.authMethod === "codex_oauth"
+                    ))}
                   >
                     {oneByOneRunning ? "Testing Connection One-by-One..." : "Test Connection One-by-One"}
                   </Button>
@@ -1549,9 +1556,9 @@ export default function ProviderDetailPage() {
                         Cookie
                       </Button>
                     )}
-                    {providerId === "codex" && (
+                    {(providerId === "codex" || providerId === "openai") && (
                       <Button size="sm" icon="playlist_add" variant="secondary" onClick={() => setShowBulkImportCodex(true)}>
-                        {translate("Bulk Add")}
+                        {providerId === "openai" ? "Import Codex Quota" : translate("Bulk Add")}
                       </Button>
                     )}
                     <Button
@@ -1611,16 +1618,16 @@ export default function ProviderDetailPage() {
                       Cookie
                     </Button>
                   )}
-                  {providerId === "codex" && (
+                  {(providerId === "codex" || providerId === "openai") && (
                     <Button
                       size="sm"
                       icon="playlist_add"
                       variant="secondary"
                       onClick={() => setShowBulkImportCodex(true)}
-                      title={translate("Bulk import codex accounts from JSON")}
+                      title={providerId === "openai" ? "Import Codex quota credentials into OpenAI" : translate("Bulk import codex accounts from JSON")}
                       className="w-full sm:w-auto"
                     >
-                      {translate("Bulk Add")}
+                      {providerId === "openai" ? "Import Codex Quota" : translate("Bulk Add")}
                     </Button>
                   )}
                   {hasDualAuthModes ? (
@@ -1795,9 +1802,10 @@ export default function ProviderDetailPage() {
         />
       )}
 
-      {providerId === "codex" && (
+      {(providerId === "codex" || providerId === "openai") && (
         <BulkImportCodexModal
           isOpen={showBulkImportCodex}
+          targetProvider={providerId}
           onClose={() => setShowBulkImportCodex(false)}
           onSuccess={fetchConnections}
         />

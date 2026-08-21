@@ -4,6 +4,7 @@
 import * as log from "../utils/logger.js";
 import { getRefreshLeadMs } from "open-sse/services/tokenRefresh.js";
 import { getCredentialExpiryMs } from "open-sse/services/oauthCredentialManager.js";
+import { isOpenAICodexQuotaConnection, isUnmarkedOpenAIOAuthConnection } from "open-sse/services/codexQuota.js";
 
 /** Refresh when expiry is within 30 minutes (or the provider on-request lead, whichever larger). */
 export const BACKGROUND_REFRESH_LEAD_MS = 30 * 60 * 1000;
@@ -50,6 +51,7 @@ export function selectConnectionsNeedingRefresh(connections, nowMs = Date.now())
   const out = [];
   for (const conn of connections) {
     if (!conn) continue;
+    if (isUnmarkedOpenAIOAuthConnection(conn)) continue;
 
     const authType = String(conn.authType || "").toLowerCase().replace(/_/g, "");
     if (authType !== "oauth") continue;
@@ -79,7 +81,8 @@ async function loadActiveConnections() {
 
 async function refreshOne(connection) {
   const { checkAndRefreshToken } = await import("./tokenRefresh.js");
-  return checkAndRefreshToken(connection.provider, connection, { force: true });
+  const provider = isOpenAICodexQuotaConnection(connection) ? "codex" : connection.provider;
+  return checkAndRefreshToken(provider, connection, { force: true });
 }
 
 /**

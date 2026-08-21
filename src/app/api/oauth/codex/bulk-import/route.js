@@ -11,8 +11,10 @@ import { extractCodexAccountInfo } from "@/lib/oauth/providers";
  *   - Single:   {...}
  *   - Wrapped:  { accounts: [{...}, ...] }
  *
- * Each item must contain at least `accessToken`. Missing email / chatgpt
- * account info is best-effort backfilled from the JWT (idToken or accessToken).
+ * Each item must contain `accessToken`, or native Codex auth fields under
+ * `tokens.access_token`. Missing email / ChatGPT account info is best-effort
+ * backfilled from the JWT (idToken or accessToken).
+ * Set targetProvider="openai" to create quota-only OpenAI connections.
  *
  * Tokens are NEVER echoed back in the response.
  */
@@ -23,6 +25,14 @@ export async function POST(request) {
   } catch (err) {
     return NextResponse.json(
       { error: `Invalid JSON body: ${err.message}` },
+      { status: 400 }
+    );
+  }
+
+  const targetProvider = body?.targetProvider || "codex";
+  if (targetProvider !== "codex" && targetProvider !== "openai") {
+    return NextResponse.json(
+      { error: "targetProvider must be codex or openai" },
       { status: 400 }
     );
   }
@@ -64,17 +74,72 @@ export async function POST(request) {
         id: _id,
         provider: _provider,
         authType: _authType,
+        apiKey: _apiKey,
+        targetProvider: _targetProvider,
         createdAt: _createdAt,
         updatedAt: _updatedAt,
         ...item
       } = raw;
 
+      // Accept both 9Router's normalized shape and the native
+      // ~/.codex/auth.json shape ({ tokens: { access_token, ... } }).
+      const nativeTokens = item.tokens && typeof item.tokens === "object" && !Array.isArray(item.tokens)
+        ? item.tokens
+        : {};
+      item.accessToken = item.accessToken || item.access_token || nativeTokens.accessToken || nativeTokens.access_token;
+      item.refreshToken = item.refreshToken || item.refresh_token || nativeTokens.refreshToken || nativeTokens.refresh_token;
+      item.idToken = item.idToken || item.id_token || nativeTokens.idToken || nativeTokens.id_token;
+      item.expiresAt = item.expiresAt || item.expires_at || nativeTokens.expiresAt || nativeTokens.expires_at;
+      item.expiresIn = item.expiresIn || item.expires_in || nativeTokens.expiresIn || nativeTokens.expires_in;
+      item.lastRefreshAt = item.lastRefreshAt || item.last_refresh || null;
+
+      const importedAccountId =
+        item.accountId ||
+        item.account_id ||
+        item.workspaceId ||
+        item.workspace_id ||
+        nativeTokens.accountId ||
+        nativeTokens.account_id ||
+        null;
+
+      delete item.tokens;
+      delete item.access_token;
+      delete item.refresh_token;
+      delete item.id_token;
+      delete item.expires_at;
+      delete item.expires_in;
+      delete item.last_refresh;
+      delete item.accountId;
+      delete item.account_id;
+      delete item.workspaceId;
+      delete item.workspace_id;
+
       if (!item.accessToken || typeof item.accessToken !== "string") {
         throw new Error("Missing accessToken");
       }
+      item.accessToken = item.accessToken.trim();
+      if (!item.accessToken) throw new Error("Missing accessToken");
+      if (typeof item.refreshToken === "string") item.refreshToken = item.refreshToken.trim() || null;
+      if (typeof item.idToken === "string") item.idToken = item.idToken.trim() || null;
 
       // Backfill missing identity fields from JWT claims
-      const psd = item.providerSpecificData || {};
+      const psd = item.providerSpecificData && typeof item.providerSpecificData === "object"
+        && !Array.isArray(item.providerSpecificData)
+        ? { ...item.providerSpecificData }
+        : {};
+      // Credentials belong in the dedicated top-level columns.  Do not copy
+      // token-shaped fields into providerSpecificData, where they could be
+      // accidentally exposed by a provider metadata response.
+      for (const sensitiveField of [
+        "accessToken", "refreshToken", "idToken", "apiKey",
+        "access_token", "refresh_token", "id_token", "tokens",
+      ]) {
+        delete psd[sensitiveField];
+      }
+      delete psd.usageOnly;
+      if (!psd.chatgptAccountId && importedAccountId) {
+        psd.chatgptAccountId = String(importedAccountId).trim();
+      }
       const needsEmail = !item.email;
       const needsAccountId = !psd.chatgptAccountId;
       const needsPlanType = !psd.chatgptPlanType;
@@ -91,6 +156,20 @@ export async function POST(request) {
       }
       if (Object.keys(psd).length > 0) {
         item.providerSpecificData = psd;
+      } else {
+        delete item.providerSpecificData;
+      }
+
+      // OpenAI Platform API keys and ChatGPT OAuth tokens are different
+      // credentials. An imported Codex account under `openai` is deliberately
+      // quota-only: it can query WHAM usage, but must never enter model routing.
+      if (targetProvider === "openai") {
+        item.providerSpecificData = {
+          ...(item.providerSpecificData || {}),
+          authMethod: "codex_oauth",
+          usageOnly: true,
+        };
+        item.isActive = false;
       }
 
       // Compute expiresAt from expiresIn if absent
@@ -103,10 +182,15 @@ export async function POST(request) {
       if (item.isActive === undefined) item.isActive = true;
       if (!item.lastRefreshAt) item.lastRefreshAt = new Date().toISOString();
 
+      const authType = targetProvider === "openai" && !item.refreshToken
+        ? "access_token"
+        : "oauth";
+      // Keep provider/authType server-controlled even if a future input
+      // normalization step adds those keys back to `item`.
       const created = await createProviderConnection({
-        provider: "codex",
-        authType: "oauth",
         ...item,
+        provider: targetProvider,
+        authType,
       });
 
       results.push({ index: i, ok: true, id: created.id });

@@ -12,6 +12,7 @@ import { resolveGrokCliModels } from "open-sse/services/grokCliModels.js";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { resolveCursorModels } from "open-sse/services/cursorModels.js";
 import { getAntigravityUsage } from "open-sse/services/usage/google.js";
+import { isOpenAICodexQuotaConnection, isUnmarkedOpenAIOAuthConnection } from "open-sse/services/codexQuota.js";
 
 const GEMINI_CLI_MODELS_URL = "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
 
@@ -486,6 +487,31 @@ export async function GET(request, { params }) {
       return NextResponse.json({ error: "Connection not found" }, { status: 404 });
     }
 
+    // A ChatGPT OAuth token imported under OpenAI is quota-only.  Never let
+    // model discovery fall through to the OpenAI Platform `/v1/models`
+    // resolver, which would send that token to the wrong service.
+    if (isOpenAICodexQuotaConnection(connection)) {
+      return NextResponse.json({
+        provider: connection.provider,
+        connectionId: connection.id,
+        models: getStaticProviderModels("openai"),
+        warning: "This connection is quota-only; live OpenAI Platform model discovery is disabled.",
+        quotaOnly: true,
+      });
+    }
+
+    // OpenAI Platform connections are API-key based in this app.  Fail closed
+    // for legacy OAuth/access-token rows without Codex provenance instead of
+    // guessing which upstream accepts the token.
+    if (isUnmarkedOpenAIOAuthConnection(connection)) {
+      return NextResponse.json({
+        provider: connection.provider,
+        connectionId: connection.id,
+        models: [],
+        warning: "OpenAI OAuth model discovery requires an explicit Codex quota credential marker.",
+      });
+    }
+
     if (isOpenAICompatibleProvider(connection.provider)) {
       const baseUrl = connection.providerSpecificData?.baseUrl;
       if (!baseUrl) {
@@ -583,7 +609,12 @@ export async function GET(request, { params }) {
     }
 
     // Get auth token
-    const token = connection.providerSpecificData?.copilotToken || connection.accessToken || connection.apiKey;
+    // OpenAI model discovery is Platform API-key only. Quota-only ChatGPT
+    // OAuth rows returned above, and unmarked OAuth rows, must never fall
+    // through to this endpoint even when a legacy row has a stale accessToken.
+    const token = connection.provider === "openai"
+      ? connection.apiKey
+      : connection.providerSpecificData?.copilotToken || connection.accessToken || connection.apiKey;
     if (!token) {
       return NextResponse.json({ error: "No valid token found" }, { status: 401 });
     }

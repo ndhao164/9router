@@ -1,4 +1,5 @@
 import { getProviderConnectionById, updateProviderConnection } from "@/lib/localDb";
+import { isOpenAICodexQuotaConnection, isUnmarkedOpenAIOAuthConnection } from "open-sse/services/codexQuota.js";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { testProxyUrl } from "@/lib/network/proxyTest";
 import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider } from "@/shared/constants/providers";
@@ -823,6 +824,22 @@ case "llm7": {
 export async function testSingleConnection(id) {
   const connection = await getProviderConnectionById(id);
   if (!connection) return { valid: false, error: "Connection not found", latencyMs: 0, testedAt: new Date().toISOString() };
+
+  // Imported Codex credentials stored under OpenAI are intentionally quota-only;
+  // their ChatGPT token must never be probed against api.openai.com.
+  if (connection.providerSpecificData?.usageOnly === true || isOpenAICodexQuotaConnection(connection)) {
+    await updateProviderConnection(id, {
+      testStatus: "active",
+      lastError: null,
+      lastErrorAt: null,
+      lastTested: new Date().toISOString(),
+    });
+    return { valid: true, error: null, refreshed: false, quotaOnly: true };
+  }
+
+  if (isUnmarkedOpenAIOAuthConnection(connection)) {
+    return { valid: false, error: "OpenAI OAuth credential is not marked as a Codex quota connection", refreshed: false };
+  }
 
   const effectiveProxy = await resolveConnectionProxyConfig(connection.providerSpecificData || {});
 
